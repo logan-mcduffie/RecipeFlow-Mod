@@ -57,15 +57,9 @@ modpackSlug = "your-modpack-slug"
 
 ## Usage
 
-In-game, run:
+In-game commands:
 ```
-/recipeflow sync
+/recipeflow sync              # Export and upload all recipes to RecipeFlow
+/recipeflow debugicon <item>  # Debug icon rendering for a specific item
+/recipeflow scangtceu         # Scan GTCEu overlay textures (debug)
 ```
-
-## Architecture
-
-See [tasks/ARCHITECTURE.md](tasks/ARCHITECTURE.md) for detailed architecture documentation.
-
-## API References
-
-- [GTCEu Modern API](docs/GTCEU-MODERN-API.md) - GregTech CEu Modern recipe extraction
