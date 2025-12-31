@@ -74,7 +74,6 @@ public class AnimatedIconRenderer {
      * Set to 1 for accurate timing now that we read per-frame durations from mcmeta.
      * Increase if GIFs play too fast in browsers (some browsers have minimum frame delays).
      */
-    private static final int FRAME_TIME_MULTIPLIER = 1;
 
     private final Minecraft minecraft;
     private RenderTarget renderTarget;
@@ -135,10 +134,11 @@ public class AnimatedIconRenderer {
         try {
             TextureAtlasSprite sprite = getAnimatedSprite(stack);
             if (sprite != null) {
-                return (int) sprite.contents().getUniqueFrames().count();
+                SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+                return timing.frameCount();
             }
         } catch (Exception e) {
-            // Ignore
+            LOGGER.debug("RecipeFlow: Failed to get frame count for {}: {}", stack.getItem(), e.getMessage());
         }
         return 1;
     }
@@ -146,6 +146,7 @@ public class AnimatedIconRenderer {
     /**
      * Get the frame time in milliseconds for animated textures.
      * Reads the actual frame time from the sprite's animation metadata.
+     * Returns the average frame time if frames have variable durations.
      *
      * @param stack The item stack
      * @return Frame time in ms, or 0 for static items
@@ -158,48 +159,35 @@ public class AnimatedIconRenderer {
         try {
             TextureAtlasSprite sprite = getAnimatedSprite(stack);
             if (sprite != null) {
-                // Try to get the animation ticker which has frame time info
-                var contents = sprite.contents();
-
-                // Use reflection to access the AnimatedTexture if available
-                // The animation info is stored in SpriteContents.animatedTexture
-                try {
-                    var animatedTextureField = contents.getClass().getDeclaredField("animatedTexture");
-                    animatedTextureField.setAccessible(true);
-                    var animatedTexture = animatedTextureField.get(contents);
-
-                    if (animatedTexture != null) {
-                        // Get the frame time (in ticks) from the animated texture's info
-                        var infoField = animatedTexture.getClass().getDeclaredField("animationInfo");
-                        infoField.setAccessible(true);
-                        var info = infoField.get(animatedTexture);
-
-                        if (info != null) {
-                            // SpriteTicker.AnimationInfo has a getDefaultFrameTime() method
-                            var getFrameTimeMethod = info.getClass().getMethod("getDefaultFrameTime");
-                            int frameTicks = (int) getFrameTimeMethod.invoke(info);
-
-                            // Convert ticks to milliseconds (20 ticks = 1 second = 1000ms)
-                            // Apply multiplier because GIFs play faster than in-game animations
-                            int frameTimeMs = frameTicks * 50 * FRAME_TIME_MULTIPLIER;
-                            LOGGER.debug("RecipeFlow: Animation frame time for {}: {} ticks = {}ms (with {}x multiplier)",
-                                    stack.getItem(), frameTicks, frameTimeMs, FRAME_TIME_MULTIPLIER);
-                            return frameTimeMs;
-                        }
-                    }
-                } catch (NoSuchFieldException | NoSuchMethodException e) {
-                    // Field names might differ between Minecraft versions, try alternative approach
-                    LOGGER.debug("RecipeFlow: Could not access animation info via reflection: {}", e.getMessage());
+                SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+                if (timing.isAnimated()) {
+                    int avgFrameTime = timing.averageFrameDurationMs();
+                    LOGGER.debug("RecipeFlow: Animation frame time for {}: {}ms avg ({} frames, {}ms total)",
+                            stack.getItem(), avgFrameTime, timing.frameCount(), timing.totalDurationMs());
+                    return avgFrameTime;
                 }
             }
         } catch (Exception e) {
             LOGGER.debug("RecipeFlow: Failed to get frame time for {}: {}", stack.getItem(), e.getMessage());
         }
 
-        // Default: Minecraft's default animation speed is 1 tick per frame = 50ms
-        // But many textures use slower speeds like 2-4 ticks
-        // Use 300ms (6 ticks) as default - GIFs tend to play faster than in-game
-        return 300;
+        // Default fallback: 100ms (2 ticks)
+        return 100;
+    }
+
+    /**
+     * Get detailed frame timing information for an animated sprite.
+     * This provides per-frame durations, which is more accurate than the average.
+     *
+     * @param sprite The sprite to get timing for
+     * @return FrameTimingInfo with per-frame data, or null if not animated
+     */
+    public SpriteAnimationMetadata.FrameTimingInfo getDetailedFrameTimings(TextureAtlasSprite sprite) {
+        if (sprite == null) {
+            return null;
+        }
+        SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+        return timing.isAnimated() ? timing : null;
     }
 
     /**
@@ -216,170 +204,35 @@ public class AnimatedIconRenderer {
             return null;
         }
 
-        List<AnimationFrame> sequence = new ArrayList<>();
-
         try {
             TextureAtlasSprite sprite = getAnimatedSprite(stack);
             if (sprite == null) {
                 return null;
             }
 
-            var contents = sprite.contents();
-            int uniqueFrameCount = (int) contents.getUniqueFrames().count();
-
-            // Try to access the animation metadata via reflection
-            try {
-                // First, log all fields on SpriteContents to find the right field name
-                LOGGER.debug("RecipeFlow: SpriteContents class: {}", contents.getClass().getName());
-                LOGGER.debug("RecipeFlow: SpriteContents fields: {}",
-                        java.util.Arrays.toString(contents.getClass().getDeclaredFields()));
-
-                // Try different possible field names for the animated texture
-                Object animatedTexture = null;
-                String[] possibleFieldNames = {"animatedTexture", "f_118802_", "ticker", "animation", "f_244704_"};
-
-                for (String fieldName : possibleFieldNames) {
-                    try {
-                        var field = contents.getClass().getDeclaredField(fieldName);
-                        field.setAccessible(true);
-                        animatedTexture = field.get(contents);
-                        if (animatedTexture != null) {
-                            LOGGER.debug("RecipeFlow: Found animation data in field '{}': {}", fieldName,
-                                    animatedTexture.getClass().getName());
-                            break;
-                        }
-                    } catch (NoSuchFieldException ignored) {
-                        // Try next field name
-                    }
-                }
-
-                // If none of the known names worked, try to find any field that looks like animation data
-                if (animatedTexture == null) {
-                    for (var field : contents.getClass().getDeclaredFields()) {
-                        field.setAccessible(true);
-                        Object value = field.get(contents);
-                        if (value != null) {
-                            String className = value.getClass().getName().toLowerCase();
-                            LOGGER.debug("RecipeFlow: Field '{}' = {} (type: {})",
-                                    field.getName(), value, value.getClass().getName());
-                            if (className.contains("animat") || className.contains("ticker") ||
-                                    className.contains("frame") || className.contains("sprite")) {
-                                animatedTexture = value;
-                                LOGGER.debug("RecipeFlow: Using field '{}' as animation data", field.getName());
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                LOGGER.debug("RecipeFlow: animatedTexture for {}: {}", stack.getItem(),
-                        animatedTexture != null ? animatedTexture.getClass().getName() : "null");
-
-                if (animatedTexture != null) {
-                    // Log all fields available on animatedTexture for debugging
-                    LOGGER.debug("RecipeFlow: animatedTexture fields: {}",
-                            java.util.Arrays.toString(animatedTexture.getClass().getDeclaredFields()));
-
-                    // In 1.20.1, AnimatedTexture has:
-                    // - f_243714_ = List<FrameInfo> (frames)
-                    // - f_244229_ = int (frameRowSize)
-                    // - f_244317_ = boolean (interpolateFrames)
-                    // The frames list is directly on AnimatedTexture, not in a separate animationInfo object
-
-                    // Find the frames list field
-                    List<?> framesList = null;
-                    for (var field : animatedTexture.getClass().getDeclaredFields()) {
-                        field.setAccessible(true);
-                        Object value = field.get(animatedTexture);
-                        if (value instanceof List<?> list && !list.isEmpty()) {
-                            framesList = list;
-                            LOGGER.debug("RecipeFlow: Found frames list in field '{}' with {} entries",
-                                    field.getName(), list.size());
-                            break;
-                        }
-                    }
-
-                    if (framesList != null && !framesList.isEmpty()) {
-                        LOGGER.debug("RecipeFlow: Found {} frames in animation sequence for {}",
-                                framesList.size(), stack.getItem());
-
-                        for (Object frameObj : framesList) {
-                            int frameIndex = -1;
-                            int frameTicks = 2; // Default
-
-                            // Log frame object class and fields on first iteration
-                            if (sequence.isEmpty()) {
-                                LOGGER.debug("RecipeFlow: Frame object class: {}, fields: {}",
-                                        frameObj.getClass().getName(),
-                                        java.util.Arrays.toString(frameObj.getClass().getDeclaredFields()));
-                            }
-
-                            // Try to find index and time fields with various possible names
-                            for (var field : frameObj.getClass().getDeclaredFields()) {
-                                field.setAccessible(true);
-                                String fieldName = field.getName().toLowerCase();
-                                Object value = field.get(frameObj);
-
-                                if (value instanceof Integer intVal) {
-                                    // Log all int fields for debugging
-                                    if (sequence.isEmpty()) {
-                                        LOGGER.debug("RecipeFlow: Frame field '{}' = {}", field.getName(), intVal);
-                                    }
-
-                                    // Heuristic: index is typically 0-7 range, time is typically 2-120
-                                    if (fieldName.contains("index") || fieldName.contains("frame")) {
-                                        frameIndex = intVal;
-                                    } else if (fieldName.contains("time") || fieldName.contains("duration")) {
-                                        frameTicks = intVal;
-                                    } else if (frameIndex == -1 && intVal >= 0 && intVal < 100) {
-                                        // First small int is likely index
-                                        frameIndex = intVal;
-                                    } else if (frameIndex != -1 && frameTicks == 2) {
-                                        // Second int is likely time
-                                        frameTicks = intVal;
-                                    }
-                                }
-                            }
-
-                            if (frameIndex >= 0) {
-                                // Convert ticks to milliseconds with multiplier
-                                int durationMs = frameTicks * 50 * FRAME_TIME_MULTIPLIER;
-                                sequence.add(new AnimationFrame(frameIndex, durationMs));
-
-                                LOGGER.debug("RecipeFlow: Frame {}: index={}, ticks={}, ms={}",
-                                        sequence.size() - 1, frameIndex, frameTicks, durationMs);
-                            }
-                        }
-
-                        if (!sequence.isEmpty()) {
-                            LOGGER.debug("RecipeFlow: Animation sequence for {}: {} frames with custom timing",
-                                    stack.getItem(), sequence.size());
-                            return sequence;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                LOGGER.debug("RecipeFlow: Could not access animation sequence via reflection: {}", e.getMessage());
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            if (!timing.isAnimated()) {
+                return null;
             }
 
-            // Fallback: create a simple sequential animation with default timing
-            int defaultDurationMs = getFrameTimeMs(stack);
-            if (defaultDurationMs == 0) {
-                defaultDurationMs = 300; // Fallback default
+            // Convert FrameTimingInfo to List<AnimationFrame>
+            List<AnimationFrame> sequence = new ArrayList<>();
+            List<Integer> indices = timing.frameIndices();
+            List<Integer> durations = timing.frameDurationsMs();
+
+            for (int i = 0; i < timing.frameCount(); i++) {
+                sequence.add(new AnimationFrame(indices.get(i), durations.get(i)));
             }
 
-            for (int i = 0; i < uniqueFrameCount; i++) {
-                sequence.add(new AnimationFrame(i, defaultDurationMs));
-            }
+            LOGGER.debug("RecipeFlow: Animation sequence for {}: {} frames, total {}ms, interpolated={}",
+                    stack.getItem(), timing.frameCount(), timing.totalDurationMs(), timing.interpolated());
 
-            LOGGER.debug("RecipeFlow: Using fallback sequential animation for {} with {} frames at {}ms each",
-                    stack.getItem(), uniqueFrameCount, defaultDurationMs);
+            return sequence;
 
         } catch (Exception e) {
             LOGGER.warn("RecipeFlow: Failed to get animation sequence for {}: {}", stack.getItem(), e.getMessage());
+            return null;
         }
-
-        return sequence.isEmpty() ? null : sequence;
     }
 
     /**
@@ -932,73 +785,123 @@ public class AnimatedIconRenderer {
             List<Object> matchingTickers = new ArrayList<>();
             Set<String> targetSpriteNames = new HashSet<>();
             for (TextureAtlasSprite sprite : sprites) {
-                targetSpriteNames.add(sprite.contents().name().toString());
+                String spriteName = sprite.contents().name().toString();
+                targetSpriteNames.add(spriteName);
+                LOGGER.info("RecipeFlow: Looking for ticker for sprite: {}", spriteName);
             }
 
-            // Get the tickAndUpload method
+            // Get the tickAndUpload method (will be set per-class as needed)
             Method tickAndUploadMethod = null;
-            Field contentsField = null;
+
+            // Cache for field lookups per ticker class (different mods have different ticker classes)
+            Map<Class<?>, Field> spriteFieldCache = new HashMap<>();
+
+            // Track stats for debugging
+            Set<String> loggedTickerClasses = new HashSet<>();
+            int tickersWithContents = 0;
+            int tickersWithNames = 0;
 
             for (Object ticker : allTickers) {
-                // Find the contents field on the ticker to identify which sprite it belongs to
-                if (contentsField == null) {
-                    String[] contentsFieldNames = {"contents", "f_243712_", "sprite", "spriteContents"};
-                    for (String name : contentsFieldNames) {
+                Class<?> tickerClass = ticker.getClass();
+
+                // Log each unique ticker class once
+                if (!loggedTickerClasses.contains(tickerClass.getName())) {
+                    LOGGER.info("RecipeFlow: Ticker class: {}", tickerClass.getName());
+                    LOGGER.info("RecipeFlow: Ticker fields: {}", java.util.Arrays.toString(tickerClass.getDeclaredFields()));
+                    loggedTickerClasses.add(tickerClass.getName());
+                }
+
+                // Find the TextureAtlasSprite field for THIS ticker's class (cached per class)
+                Field contentsField = spriteFieldCache.get(tickerClass);
+                if (contentsField == null && !spriteFieldCache.containsKey(tickerClass)) {
+                    // Use ObfuscationHelper constants for the ticker wrapper sprite field
+                    contentsField = ObfuscationHelper.findField(tickerClass,
+                            ObfuscationHelper.TICKER_WRAPPER_SPRITE);
+
+                    if (contentsField != null) {
+                        // Verify it's actually a TextureAtlasSprite
                         try {
-                            contentsField = ticker.getClass().getDeclaredField(name);
-                            contentsField.setAccessible(true);
-                            break;
-                        } catch (NoSuchFieldException ignored) {}
+                            Object testValue = contentsField.get(ticker);
+                            if (testValue instanceof TextureAtlasSprite) {
+                                LOGGER.info("RecipeFlow: Found TextureAtlasSprite field '{}' for class {}",
+                                        contentsField.getName(), tickerClass.getSimpleName());
+                            } else {
+                                contentsField = null; // Reset if wrong type
+                            }
+                        } catch (Exception e) {
+                            contentsField = null;
+                        }
                     }
 
-                    // If we can't find by name, look for SpriteContents type
+                    // If not found, search all fields for TextureAtlasSprite type
                     if (contentsField == null) {
-                        for (Field field : ticker.getClass().getDeclaredFields()) {
-                            field.setAccessible(true);
-                            Object value = field.get(ticker);
-                            if (value != null && value.getClass().getSimpleName().contains("SpriteContents")) {
-                                contentsField = field;
-                                LOGGER.debug("RecipeFlow: Found contents field by type: {}", field.getName());
-                                break;
+                        for (Field field : tickerClass.getDeclaredFields()) {
+                            try {
+                                field.setAccessible(true);
+                                Object value = field.get(ticker);
+                                if (value instanceof TextureAtlasSprite) {
+                                    contentsField = field;
+                                    LOGGER.info("RecipeFlow: Found TextureAtlasSprite field by type '{}' for class {}",
+                                            field.getName(), tickerClass.getSimpleName());
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                // Skip inaccessible fields
                             }
                         }
                     }
+
+                    // Cache the result (even if null, to avoid re-searching)
+                    spriteFieldCache.put(tickerClass, contentsField);
                 }
 
+                // Find tickAndUpload method if not yet found (try on this class)
                 if (tickAndUploadMethod == null) {
-                    String[] methodNames = {"tickAndUpload", "m_245385_"};
-                    for (String name : methodNames) {
-                        try {
-                            tickAndUploadMethod = ticker.getClass().getDeclaredMethod(name);
-                            tickAndUploadMethod.setAccessible(true);
-                            break;
-                        } catch (NoSuchMethodException ignored) {}
+                    // Use ObfuscationHelper for tickAndUpload method - try without params first
+                    tickAndUploadMethod = ObfuscationHelper.findMethod(tickerClass,
+                            ObfuscationHelper.TICKER_TICK_AND_UPLOAD);
+
+                    if (tickAndUploadMethod != null) {
+                        LOGGER.info("RecipeFlow: Found tickAndUpload method: {}", tickAndUploadMethod.getName());
+                    } else {
+                        // Try with int parameters (x, y coordinates)
+                        tickAndUploadMethod = ObfuscationHelper.findMethod(tickerClass,
+                                new Class<?>[] { int.class, int.class },
+                                ObfuscationHelper.TICKER_TICK_AND_UPLOAD);
+
+                        if (tickAndUploadMethod != null) {
+                            LOGGER.info("RecipeFlow: Found tickAndUpload method with params: {}", tickAndUploadMethod.getName());
+                        }
                     }
                 }
 
                 // Check if this ticker's sprite matches one we're looking for
                 if (contentsField != null) {
-                    Object contents = contentsField.get(ticker);
-                    if (contents != null) {
-                        // Get the name from SpriteContents
-                        try {
-                            Method nameMethod = contents.getClass().getMethod("name");
-                            Object nameObj = nameMethod.invoke(contents);
-                            String spriteName = nameObj.toString();
+                    try {
+                        Object spriteObj = contentsField.get(ticker);
+                        if (spriteObj instanceof TextureAtlasSprite sprite) {
+                            tickersWithContents++;
+                            // Get the name from TextureAtlasSprite.contents().name()
+                            String spriteName = sprite.contents().name().toString();
+                            tickersWithNames++;
 
                             if (targetSpriteNames.contains(spriteName)) {
                                 matchingTickers.add(ticker);
                                 LOGGER.info("RecipeFlow: Found matching ticker for sprite: {}", spriteName);
                             }
-                        } catch (Exception e) {
-                            LOGGER.debug("RecipeFlow: Could not get sprite name from ticker: {}", e.getMessage());
                         }
+                    } catch (Exception e) {
+                        LOGGER.debug("RecipeFlow: Error accessing sprite from ticker {}: {}",
+                                tickerClass.getSimpleName(), e.getMessage());
                     }
                 }
             }
 
+            LOGGER.info("RecipeFlow: Ticker analysis: {} total, {} with contents, {} with names",
+                    allTickers.size(), tickersWithContents, tickersWithNames);
+
             if (matchingTickers.isEmpty()) {
-                LOGGER.warn("RecipeFlow: Could not find tickers for any of the target sprites");
+                LOGGER.warn("RecipeFlow: Could not find tickers for any of the target sprites: {}", targetSpriteNames);
                 // Fall back to ticking ALL tickers (may cause OpenGL errors but might work)
                 matchingTickers.addAll(allTickers);
                 LOGGER.info("RecipeFlow: Falling back to ticking all {} tickers", matchingTickers.size());
@@ -1017,31 +920,160 @@ public class AnimatedIconRenderer {
             int ticksPerFrame = Math.max(1, frameTimeMs / 50);
             LOGGER.info("RecipeFlow: Will tick {} times per animation frame", ticksPerFrame);
 
-            // Capture frames by ticking our specific tickers
+            // Try to get the inner SpriteTicker from the wrapper for more control
+            // The wrapper (TextureAtlasSprite$1) has val$spriteticker which is the actual ticker
+            Field innerTickerField = ObfuscationHelper.findField(matchingTickers.get(0).getClass(),
+                    ObfuscationHelper.TICKER_WRAPPER_INNER_TICKER);
+
+            // Also get the sprite reference to get atlas coordinates
+            Field wrapperSpriteField = spriteFieldCache.get(matchingTickers.get(0).getClass());
+
+            // Try to get the AnimatedTexture from the inner ticker to directly upload frames
+            // The AnimatedTexture has uploadFrame(int x, int y, int frameIndex) which is what we need
+            Object animatedTexture = null;
+            Method animatedTextureUploadFrame = null;
+            Field animationInfoField = null;
+
+            if (innerTickerField != null && wrapperSpriteField != null) {
+                try {
+                    Object innerTicker = innerTickerField.get(matchingTickers.get(0));
+                    Object spriteObj = wrapperSpriteField.get(matchingTickers.get(0));
+
+                    if (innerTicker != null && spriteObj instanceof TextureAtlasSprite) {
+                        LOGGER.info("RecipeFlow: Found inner SpriteTicker: {}", innerTicker.getClass().getName());
+
+                        // Log all fields on the Ticker for debugging
+                        LOGGER.info("RecipeFlow: Inner Ticker fields: {}",
+                                java.util.Arrays.toString(innerTicker.getClass().getDeclaredFields()));
+
+                        // The AnimatedTexture IS on the Ticker as f_243921_ (SpriteContents$AnimatedTexture)
+                        // Get the animatedTexture field from the inner Ticker
+                        animationInfoField = ObfuscationHelper.findField(innerTicker.getClass(),
+                                ObfuscationHelper.TICKER_ANIMATION_INFO);
+
+                        if (animationInfoField != null) {
+                            animatedTexture = animationInfoField.get(innerTicker);
+                            if (animatedTexture != null) {
+                                LOGGER.info("RecipeFlow: Found AnimatedTexture: {}", animatedTexture.getClass().getName());
+
+                                // Log all methods on AnimatedTexture
+                                LOGGER.info("RecipeFlow: AnimatedTexture methods: {}",
+                                        java.util.Arrays.toString(animatedTexture.getClass().getDeclaredMethods()));
+
+                                // Find uploadFrame(int x, int y, int frameIndex) on AnimatedTexture
+                                // Use ObfuscationHelper which wraps Forge's ObfuscationReflectionHelper
+                                animatedTextureUploadFrame = ObfuscationHelper.findMethod(
+                                        animatedTexture.getClass(),
+                                        new Class<?>[] { int.class, int.class, int.class },
+                                        ObfuscationHelper.ANIMATED_TEXTURE_UPLOAD_FRAME);
+
+                                if (animatedTextureUploadFrame != null) {
+                                    LOGGER.info("RecipeFlow: Found AnimatedTexture.uploadFrame method: {}", animatedTextureUploadFrame.getName());
+                                } else {
+                                    LOGGER.warn("RecipeFlow: Could not find uploadFrame on AnimatedTexture. Available methods: {}",
+                                            java.util.Arrays.toString(animatedTexture.getClass().getDeclaredMethods()));
+                                }
+                            } else {
+                                LOGGER.warn("RecipeFlow: animatedTexture field is null on Ticker");
+                            }
+                        } else {
+                            LOGGER.warn("RecipeFlow: Could not find animatedTexture field on Ticker");
+                        }
+                    }
+                } catch (Exception e) {
+                    LOGGER.warn("RecipeFlow: Could not access AnimatedTexture: {}", e.getMessage());
+                }
+            }
+
+            // Log what we have before the frame loop
+            LOGGER.info("RecipeFlow: Pre-loop state - innerTickerField: {}, animatedTexture: {}, uploadMethod: {}, wrapperSpriteField: {}",
+                    innerTickerField != null, animatedTexture != null, animatedTextureUploadFrame != null, wrapperSpriteField != null);
+
+            // Capture frames by directly uploading specific frame indices
             for (int frame = 0; frame < frameCount; frame++) {
                 // Bind the atlas texture
                 RenderSystem.bindTexture(blockAtlasTexture.getId());
 
-                // Tick the matching tickers to advance their animation
-                for (int tick = 0; tick < ticksPerFrame; tick++) {
-                    for (Object ticker : matchingTickers) {
-                        try {
+                // Upload the specific frame for each matching ticker
+                boolean uploadedSuccessfully = false;
+                for (Object ticker : matchingTickers) {
+                    try {
+                        if (animatedTextureUploadFrame != null && wrapperSpriteField != null && innerTickerField != null && animationInfoField != null) {
+                            // Get the sprite and inner ticker for this specific wrapper
+                            Object spriteObj = wrapperSpriteField.get(ticker);
+                            Object innerTicker = innerTickerField.get(ticker);
+
+                            if (spriteObj instanceof TextureAtlasSprite sprite && innerTicker != null) {
+                                // Get AnimatedTexture from the inner Ticker (f_243921_)
+                                Object tickerAnimatedTexture = animationInfoField.get(innerTicker);
+
+                                if (frame == 0) {
+                                    LOGGER.info("RecipeFlow: tickerAnimatedTexture: {}, sprite: {}",
+                                            tickerAnimatedTexture != null ? tickerAnimatedTexture.getClass().getSimpleName() : "null",
+                                            sprite.contents().name());
+                                }
+
+                                if (tickerAnimatedTexture != null) {
+                                    // Directly upload the specific frame using AnimatedTexture.uploadFrame(x, y, frameIndex)
+                                    animatedTextureUploadFrame.invoke(tickerAnimatedTexture, sprite.getX(), sprite.getY(), frame);
+                                    uploadedSuccessfully = true;
+                                    LOGGER.info("RecipeFlow: Uploaded frame {} at ({}, {}) for {}",
+                                            frame, sprite.getX(), sprite.getY(), sprite.contents().name());
+                                    continue;  // Skip fallback for this ticker
+                                } else {
+                                    if (frame == 0) {
+                                        LOGGER.warn("RecipeFlow: AnimatedTexture is null for sprite {}", sprite.contents().name());
+                                    }
+                                }
+                            } else {
+                                if (frame == 0) {
+                                    LOGGER.warn("RecipeFlow: spriteObj or innerTicker issue: sprite={}, innerTicker={}",
+                                            spriteObj != null ? spriteObj.getClass().getName() : "null",
+                                            innerTicker != null ? innerTicker.getClass().getName() : "null");
+                                }
+                            }
+                        }
+                        // Fallback to wrapper method (tick multiple times) - only if direct upload didn't work
+                        if (frame == 0) {
+                            LOGGER.info("RecipeFlow: Using fallback wrapper method");
+                        }
+                        for (int tick = 0; tick < ticksPerFrame; tick++) {
                             tickAndUploadMethod.invoke(ticker);
-                        } catch (Exception e) {
-                            // Ignore individual ticker failures
+                        }
+                    } catch (Exception e) {
+                        if (frame == 0) {
+                            // Get the real cause if it's an InvocationTargetException
+                            Throwable cause = e.getCause() != null ? e.getCause() : e;
+                            LOGGER.warn("RecipeFlow: Frame set/upload failed: {} - {}",
+                                    cause.getClass().getSimpleName(), cause.getMessage());
+                            LOGGER.warn("RecipeFlow: Stack trace:", cause);
                         }
                     }
                 }
 
-                // Re-bind after ticking
-                RenderSystem.bindTexture(blockAtlasTexture.getId());
+                if (frame == 0) {
+                    LOGGER.info("RecipeFlow: Frame {} upload status: direct={}", frame, uploadedSuccessfully);
+                }
+
+                // Ensure GPU has the updated texture before rendering
+                if (uploadedSuccessfully) {
+                    // Use glFinish to block until texture upload is complete
+                    GL11.glFinish();
+                }
+
+                // Re-bind after uploading and log texture ID for debugging
+                int atlasId = blockAtlasTexture.getId();
+                RenderSystem.bindTexture(atlasId);
+                if (frame == 0) {
+                    LOGGER.info("RecipeFlow: Atlas texture ID: {}", atlasId);
+                }
 
                 // Render the item
                 BufferedImage renderedFrame = renderItem(stack);
                 sequenceFrames.add(renderedFrame);
                 frameDurations.add(frameTimeMs);
 
-                LOGGER.debug("RecipeFlow: Captured frame {} after ticking {} tickers", frame, matchingTickers.size());
+                LOGGER.info("RecipeFlow: Captured frame {} for {} tickers", frame, matchingTickers.size());
             }
 
             LOGGER.info("RecipeFlow: Completed ticker-based animation capture with {} frames", sequenceFrames.size());
