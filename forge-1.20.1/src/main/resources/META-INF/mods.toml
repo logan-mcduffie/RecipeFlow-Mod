@@ -1,0 +1,30 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "MIT"
+
+[[mixins]]
+config = "recipeflow.mixins.json"
+
+[[mods]]
+modId = "recipeflow"
+version = "${file.jarVersion}"
+displayName = "RecipeFlow"
+authors = "RecipeFlow Team"
+description = '''
+Recipe extraction and sync mod for RecipeFlow web application.
+Extracts recipes from modpacks and uploads to your RecipeFlow server.
+'''
+
+[[dependencies.recipeflow]]
+modId = "forge"
+mandatory = true
+versionRange = "[47,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.recipeflow]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20.1,1.21)"
+ordering = "NONE"
+side = "BOTH"

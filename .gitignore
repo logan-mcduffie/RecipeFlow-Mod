@@ -1,0 +1,37 @@
+# Gradle
+.gradle/
+build/
+out/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.launch
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# Minecraft
+run/
+runs/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+*.jar
+*.zip
+
+# Local config
+local.properties
+
+# Claude Code local settings
+.claude/settings.local.json

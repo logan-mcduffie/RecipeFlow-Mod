@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.recipeflow.mod.v120plus.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "recipeflow.refmap.json",
+  "client": [
+    "ScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
