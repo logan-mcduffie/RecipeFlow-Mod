@@ -167,7 +167,7 @@ public class GTCEuIconHelper {
      *
      * @param stack The item stack to check
      * @param baseSpriteFrames The number of sprite animation frames
-     * @return The recommended total frame count for GIF capture
+     * @return The recommended total frame count for animation capture
      */
     public static int getRecommendedFrameCount(ItemStack stack, int baseSpriteFrames) {
         if (!hasAnimatedTint(stack)) {
@@ -176,12 +176,12 @@ public class GTCEuIconHelper {
 
         // For OPV/MAX tier, we need enough frames to show the color cycle
         // A full cycle is 288 ticks at 1.25 deg/tick
-        // For a reasonable GIF size, capture ~72 frames (every 4 ticks = 5 FPS equivalent)
+        // Capture ~72 frames (every 4 ticks = 5 FPS equivalent)
         // This gives a ~3.6 second loop through the full rainbow
         int colorCycleFrames = 72;
 
         // Return the LCM of sprite frames and color cycle frames for smooth looping
-        // But cap it to prevent enormous GIFs
+        // Cap to prevent excessive frame counts
         int combined = lcm(baseSpriteFrames, colorCycleFrames);
         return Math.min(combined, 144); // Cap at 144 frames (~7 seconds at 20 FPS)
     }
@@ -197,7 +197,7 @@ public class GTCEuIconHelper {
     }
 
     /**
-     * Get the frame duration in milliseconds for OPV color cycling GIFs.
+     * Get the frame duration in milliseconds for OPV color cycling animations.
      *
      * @return Frame duration in ms (200ms = 5 FPS for color cycling)
      */

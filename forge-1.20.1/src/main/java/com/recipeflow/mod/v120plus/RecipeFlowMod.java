@@ -1,23 +1,17 @@
 package com.recipeflow.mod.v120plus;
 
-import com.recipeflow.mod.core.export.IconMetadata;
 import com.recipeflow.mod.core.registry.ProviderRegistry;
 import com.recipeflow.mod.v120plus.command.SyncCommand;
 import com.recipeflow.mod.v120plus.config.ForgeConfig120;
 import com.recipeflow.mod.v120plus.provider.GTCEuRecipeProvider;
 import com.recipeflow.mod.v120plus.provider.StandardRecipeProvider;
-import com.recipeflow.mod.v120plus.util.IconExporter;
-import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import java.nio.file.Path;
 
 /**
  * RecipeFlow Companion Mod - 1.20.1 Entry Point
@@ -79,36 +73,5 @@ public class RecipeFlowMod {
      */
     public ProviderRegistry getProviderRegistry() {
         return providerRegistry;
-    }
-
-    /**
-     * Export all item icons to the specified directory.
-     * Must be called on the client side (requires rendering context).
-     *
-     * @param outputDir The directory to save icons to
-     * @param callback Progress callback (may be null)
-     * @return IconMetadata containing information about all exported icons
-     * @throws IllegalStateException if called on a dedicated server
-     */
-    public IconMetadata exportIcons(Path outputDir, IconExporter.ExportCallback callback) {
-        if (FMLEnvironment.dist != Dist.CLIENT) {
-            throw new IllegalStateException("Icon export must be run on the client side");
-        }
-
-        LOGGER.info("RecipeFlow: Starting icon export to {}", outputDir);
-        IconExporter exporter = new IconExporter();
-        return exporter.exportAllIcons(outputDir, callback);
-    }
-
-    /**
-     * Export all item icons to the default icons directory.
-     * Must be called on the client side (requires rendering context).
-     *
-     * @param callback Progress callback (may be null)
-     * @return IconMetadata containing information about all exported icons
-     */
-    public IconMetadata exportIcons(IconExporter.ExportCallback callback) {
-        Path defaultDir = Path.of("config", MOD_ID, "icons");
-        return exportIcons(defaultDir, callback);
     }
 }

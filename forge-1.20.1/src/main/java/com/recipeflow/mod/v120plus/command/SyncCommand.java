@@ -10,7 +10,6 @@ import com.recipeflow.mod.core.api.RecipeProvider;
 import com.recipeflow.mod.core.config.ModConfig;
 import com.recipeflow.mod.core.export.ExportResult;
 import com.recipeflow.mod.core.export.HttpExporter;
-import com.recipeflow.mod.core.export.IconMetadata;
 import com.recipeflow.mod.core.model.ItemMetadata;
 import com.recipeflow.mod.core.registry.ProviderRegistry;
 import com.recipeflow.mod.core.upload.ChunkedUploader;
@@ -20,7 +19,6 @@ import com.recipeflow.mod.core.util.VersionDetector;
 import com.recipeflow.mod.v120plus.RecipeFlowMod;
 import com.recipeflow.mod.v120plus.auth.AuthProvider;
 import com.recipeflow.mod.v120plus.config.ForgeConfig120;
-import com.recipeflow.mod.v120plus.util.IconUploader;
 import com.recipeflow.mod.v120plus.util.ItemMetadataExtractor;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -84,11 +82,6 @@ public class SyncCommand {
         // Register auth commands (login/logout)
         AuthCommand.registerSubcommands(recipeflowCommand);
 
-        // Register debug icon command (client only)
-        if (FMLEnvironment.dist == Dist.CLIENT) {
-            DebugIconCommand.registerSubcommand(recipeflowCommand);
-        }
-
         dispatcher.register(recipeflowCommand);
 
         LOGGER.info("RecipeFlow: Registered /recipeflow command");
@@ -96,6 +89,7 @@ public class SyncCommand {
 
     /**
      * Execute the sync command.
+     * Currently only syncs recipes. Icon sync will be added via /recipeflow sync icons.
      */
     private static int executeSync(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
@@ -115,13 +109,8 @@ public class SyncCommand {
             return 0;
         }
 
-        // Icon export requires client
         boolean isClient = FMLEnvironment.dist == Dist.CLIENT;
-        if (!isClient) {
-            sendMessage(source, "Note: Running on dedicated server. Icon export will be skipped.");
-        }
-
-        sendMessage(source, "Starting sync...");
+        sendMessage(source, "Starting recipe sync...");
 
         // Run async to avoid blocking the main thread
         // Use custom executor to inherit mod classloader context and avoid ClassNotFoundException
@@ -140,11 +129,12 @@ public class SyncCommand {
     }
 
     /**
-     * Async sync execution.
+     * Async sync execution - recipes only.
+     * Icon sync will be implemented separately via /recipeflow sync icons.
      */
     private static void executeSyncAsync(CommandSourceStack source,
                                           ModConfig config,
-                                          boolean exportIcons) {
+                                          boolean isClient) {
         // Step 1: Detect modpack version
         Path gameDir = FMLPaths.GAMEDIR.get();
         String version = VersionDetector.getEffectiveVersion(gameDir, config.getVersionOverride());
@@ -204,42 +194,13 @@ public class SyncCommand {
             return;
         }
 
-        // Step 4: Export and upload icons (client only)
-        // IMPORTANT: Icon export must run on the main render thread for OpenGL operations
-        if (exportIcons) {
-            // Check if icons already exist on server before doing expensive export
-            ChunkedUploader checkUploader = new ChunkedUploader(config);
-            boolean iconsExist = checkUploader.checkUploadExists(version, "icons");
-
-            if (iconsExist) {
-                sendMessage(source, "Icons already exist on server, skipping export");
-            } else {
-                try {
-                    // Block until icon export completes on the main thread
-                    java.util.concurrent.CompletableFuture<Void> iconFuture = new java.util.concurrent.CompletableFuture<>();
-                    net.minecraft.client.Minecraft.getInstance().execute(() -> {
-                        try {
-                            exportAndUploadIcons(source, config, version);
-                            iconFuture.complete(null);
-                        } catch (Exception e) {
-                            iconFuture.completeExceptionally(e);
-                        }
-                    });
-                    iconFuture.get(); // Wait for icon export to complete
-                } catch (Exception e) {
-                    LOGGER.warn("RecipeFlow: Icon export failed", e);
-                    sendMessage(source, "Warning: Icon export failed: " + e.getMessage());
-                }
-            }
-        }
-
-        // Step 4.5: Extract and upload item metadata (client only)
-        if (exportIcons) {
+        // Step 4: Extract and upload item metadata (client only)
+        if (isClient) {
             extractAndUploadItemMetadata(source, config, version, recipes);
         }
 
         // Step 5: Upload recipes to server
-        sendMessage(source, "Uploading to server...");
+        sendMessage(source, "Uploading recipes to server...");
 
         HttpExporter exporter = new HttpExporter(config);
         ExportResult result = exporter.syncRecipes(recipes, version, manifestHash,
@@ -256,62 +217,6 @@ public class SyncCommand {
             if (result.getException() != null && config.isDebugLogging()) {
                 LOGGER.error("Sync error details", result.getException());
             }
-        }
-    }
-
-    /**
-     * Export and upload icons with progress feedback.
-     */
-    private static void exportAndUploadIcons(CommandSourceStack source, ModConfig config, String version) {
-        sendMessage(source, "Exporting icons...");
-
-        try {
-            // Export icons to default directory (config/recipeflow/icons)
-            Path iconDir = Path.of("config", RecipeFlowMod.MOD_ID, "icons");
-            final int[] lastReportedIconPercent = {0};
-            IconMetadata icons = RecipeFlowMod.getInstance().exportIcons(
-                    iconDir,
-                    (current, total, itemId) -> {
-                        // Report progress every 15% or at completion
-                        int percent = (current * 100) / total;
-                        if (percent >= lastReportedIconPercent[0] + 15 || current == total) {
-                            lastReportedIconPercent[0] = percent;
-                            sendMessage(source, String.format("  Exporting icons... %d%% (%s/%s)",
-                                    percent,
-                                    NUMBER_FORMAT.format(current),
-                                    NUMBER_FORMAT.format(total)));
-                        }
-                    }
-            );
-            sendMessage(source, "Exported " + NUMBER_FORMAT.format(icons.size()) + " icons");
-
-            // Upload icons to server
-            sendMessage(source, "Uploading icons...");
-            IconUploader uploader = new IconUploader(config);
-            UploadResult uploadResult = uploader.uploadIcons(
-                    iconDir,
-                    icons,
-                    version,
-                    (current, total, message) -> {
-                        sendMessage(source, "  " + message);
-                    }
-            );
-
-            // Report upload result
-            if (uploadResult.isSuccess()) {
-                sendSuccess(source, uploadResult.getSummary());
-            } else {
-                sendError(source, "Icon upload failed: " + uploadResult.getErrorMessage());
-                if (uploadResult.getException() != null && config.isDebugLogging()) {
-                    LOGGER.error("Icon upload error details", uploadResult.getException());
-                }
-            }
-
-        } catch (Exception e) {
-            LOGGER.warn("RecipeFlow: Icon export/upload failed", e);
-            sendMessage(source, "Warning: Icon export/upload failed: " + e.getMessage());
-            sendMessage(source, "Continuing with recipe sync...");
-            // Continue with recipe sync even if icon export/upload fails
         }
     }
 
