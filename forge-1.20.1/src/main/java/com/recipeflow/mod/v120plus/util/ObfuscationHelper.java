@@ -1,5 +1,6 @@
 package com.recipeflow.mod.v120plus.util;
 
+import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.renderer.texture.SpriteContents;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -31,6 +32,10 @@ public final class ObfuscationHelper {
     // SpriteContents.animatedTexture (SRG: f_118802_)
     private static Field spriteContentsAnimatedTextureField = null;
     private static boolean spriteContentsAnimatedTextureFieldInitialized = false;
+
+    // SpriteContents.originalImage (the source NativeImage with all frames)
+    private static Field spriteContentsOriginalImageField = null;
+    private static boolean spriteContentsOriginalImageFieldInitialized = false;
 
     // ==================== SpriteContents ====================
 
@@ -95,6 +100,149 @@ public final class ObfuscationHelper {
             return field.get(contents);
         } catch (IllegalAccessException e) {
             LOGGER.error("RecipeFlow: Could not access animatedTexture field: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    // SpriteContents.byMipLevel (NativeImage[] used for rendering/uploading)
+    private static Field spriteContentsByMipLevelField = null;
+    private static boolean spriteContentsByMipLevelFieldInitialized = false;
+
+    /**
+     * Get the originalImage field from SpriteContents.
+     * This contains the full source image with all animation frames as a vertical strip.
+     * Prefers the single NativeImage field (f_243904_) over the array.
+     */
+    @Nullable
+    public static Field getSpriteContentsOriginalImageField() {
+        if (!spriteContentsOriginalImageFieldInitialized) {
+            spriteContentsOriginalImageFieldInitialized = true;
+
+            // First try to find the single NativeImage field (originalImage with all frames)
+            // f_243904_ is the single NativeImage containing all animation frames vertically
+            String[] singleImageNames = {"f_243904_", "originalImage"};
+            for (String name : singleImageNames) {
+                try {
+                    spriteContentsOriginalImageField = ObfuscationReflectionHelper.findField(
+                            SpriteContents.class, name);
+                    LOGGER.info("RecipeFlow: Found SpriteContents.originalImage field via Forge helper: {}", name);
+                    return spriteContentsOriginalImageField;
+                } catch (Exception e) {
+                    try {
+                        spriteContentsOriginalImageField = SpriteContents.class.getDeclaredField(name);
+                        spriteContentsOriginalImageField.setAccessible(true);
+                        LOGGER.info("RecipeFlow: Found SpriteContents.originalImage field via direct access: {}", name);
+                        return spriteContentsOriginalImageField;
+                    } catch (NoSuchFieldException ignored) {}
+                }
+            }
+
+            // Last resort: find by type (prefer single NativeImage over array)
+            for (Field field : SpriteContents.class.getDeclaredFields()) {
+                if (field.getType() == NativeImage.class) {
+                    field.setAccessible(true);
+                    spriteContentsOriginalImageField = field;
+                    LOGGER.info("RecipeFlow: Found SpriteContents.originalImage field by type: {} (NativeImage)",
+                            field.getName());
+                    return spriteContentsOriginalImageField;
+                }
+            }
+
+            LOGGER.error("RecipeFlow: Could not find originalImage field on SpriteContents");
+        }
+        return spriteContentsOriginalImageField;
+    }
+
+    /**
+     * Get the byMipLevel field from SpriteContents.
+     * This is the NativeImage[] array used for actual rendering and uploading.
+     * Element 0 is full resolution, higher indices are mip levels.
+     */
+    @Nullable
+    public static Field getSpriteContentsByMipLevelField() {
+        if (!spriteContentsByMipLevelFieldInitialized) {
+            spriteContentsByMipLevelFieldInitialized = true;
+
+            // f_243731_ is the NativeImage[] byMipLevel array
+            String[] arrayNames = {"f_243731_", "byMipLevel"};
+            for (String name : arrayNames) {
+                try {
+                    spriteContentsByMipLevelField = ObfuscationReflectionHelper.findField(
+                            SpriteContents.class, name);
+                    LOGGER.info("RecipeFlow: Found SpriteContents.byMipLevel field via Forge helper: {}", name);
+                    return spriteContentsByMipLevelField;
+                } catch (Exception e) {
+                    try {
+                        spriteContentsByMipLevelField = SpriteContents.class.getDeclaredField(name);
+                        spriteContentsByMipLevelField.setAccessible(true);
+                        LOGGER.info("RecipeFlow: Found SpriteContents.byMipLevel field via direct access: {}", name);
+                        return spriteContentsByMipLevelField;
+                    } catch (NoSuchFieldException ignored) {}
+                }
+            }
+
+            // Last resort: find NativeImage[] by type
+            for (Field field : SpriteContents.class.getDeclaredFields()) {
+                if (field.getType() == NativeImage[].class) {
+                    field.setAccessible(true);
+                    spriteContentsByMipLevelField = field;
+                    LOGGER.info("RecipeFlow: Found SpriteContents.byMipLevel field by type: {} (NativeImage[])",
+                            field.getName());
+                    return spriteContentsByMipLevelField;
+                }
+            }
+
+            LOGGER.error("RecipeFlow: Could not find byMipLevel field on SpriteContents");
+        }
+        return spriteContentsByMipLevelField;
+    }
+
+    /**
+     * Get the original NativeImage from a SpriteContents instance.
+     * This image contains all animation frames stacked vertically.
+     *
+     * @param contents The SpriteContents to extract from
+     * @return The NativeImage, or null if not accessible
+     */
+    @Nullable
+    public static NativeImage getOriginalImage(SpriteContents contents) {
+        Field field = getSpriteContentsOriginalImageField();
+        if (field == null || contents == null) return null;
+        try {
+            Object value = field.get(contents);
+            if (value instanceof NativeImage) {
+                return (NativeImage) value;
+            }
+            LOGGER.warn("RecipeFlow: originalImage field has unexpected type: {}",
+                    value != null ? value.getClass().getName() : "null");
+            return null;
+        } catch (IllegalAccessException e) {
+            LOGGER.error("RecipeFlow: Could not access originalImage field: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Get the byMipLevel NativeImage array from a SpriteContents instance.
+     * This is used for uploading frames to the texture atlas.
+     *
+     * @param contents The SpriteContents to extract from
+     * @return The NativeImage[] array, or null if not accessible
+     */
+    @Nullable
+    public static NativeImage[] getByMipLevel(SpriteContents contents) {
+        Field field = getSpriteContentsByMipLevelField();
+        if (field == null || contents == null) return null;
+        try {
+            Object value = field.get(contents);
+            if (value instanceof NativeImage[]) {
+                return (NativeImage[]) value;
+            }
+            LOGGER.warn("RecipeFlow: byMipLevel field has unexpected type: {}",
+                    value != null ? value.getClass().getName() : "null");
+            return null;
+        } catch (IllegalAccessException e) {
+            LOGGER.error("RecipeFlow: Could not access byMipLevel field: {}", e.getMessage());
             return null;
         }
     }
@@ -303,5 +451,15 @@ public final class ObfuscationHelper {
      */
     public static final String[] ANIMATED_TEXTURE_INTERPOLATE = {
         "f_244317_", "interpolateFrames"
+    };
+
+    /**
+     * SpriteContents.byMipLevel - Array of NativeImages for each mip level
+     * Type: NativeImage[]
+     * The first element (index 0) is the full-resolution source image with all frames
+     * SRG: f_244576_
+     */
+    public static final String[] SPRITE_CONTENTS_BY_MIP_LEVEL = {
+        "f_244576_", "f_118803_", "byMipLevel", "originalImage"
     };
 }

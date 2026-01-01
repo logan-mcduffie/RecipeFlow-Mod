@@ -7,6 +7,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -48,9 +50,11 @@ public class IconExporter {
     private static final int WRITE_THREAD_COUNT = 4; // Number of threads for async file writing
 
     private final AnimatedIconRenderer renderer;
+    private final FluidIconRenderer fluidRenderer;
 
     public IconExporter() {
         this.renderer = new AnimatedIconRenderer();
+        this.fluidRenderer = new FluidIconRenderer();
     }
 
     /**
@@ -567,5 +571,228 @@ public class IconExporter {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Export all fluid icons to the specified directory.
+     *
+     * @param outputDir The directory to save icons to
+     * @param callback Progress callback (may be null)
+     * @return IconMetadata containing information about all exported fluid icons
+     */
+    public IconMetadata exportAllFluidIcons(Path outputDir, ExportCallback callback) {
+        IconMetadata metadata = new IconMetadata();
+
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException e) {
+            LOGGER.error("RecipeFlow: Failed to create output directory: {}", e.getMessage());
+            return metadata;
+        }
+
+        // Collect all fluids
+        List<ResourceLocation> fluidIds = new ArrayList<>();
+        List<Fluid> fluids = new ArrayList<>();
+
+        for (var entry : ForgeRegistries.FLUIDS.getEntries()) {
+            ResourceLocation fluidId = entry.getKey().location();
+            Fluid fluid = entry.getValue();
+
+            // Skip empty fluid
+            if (fluid == Fluids.EMPTY) {
+                continue;
+            }
+
+            fluidIds.add(fluidId);
+            fluids.add(fluid);
+        }
+
+        int total = fluids.size();
+        LOGGER.info("RecipeFlow: Starting fluid icon export for {} fluids", total);
+
+        for (int i = 0; i < total; i++) {
+            ResourceLocation fluidId = fluidIds.get(i);
+            Fluid fluid = fluids.get(i);
+
+            try {
+                IconMetadata.IconEntry iconEntry = exportFluidIcon(fluid, fluidId, outputDir);
+                if (iconEntry != null) {
+                    metadata.addIcon(fluidId.toString(), iconEntry);
+                }
+            } catch (Exception e) {
+                LOGGER.warn("RecipeFlow: Failed to export fluid icon for {}: {}", fluidId, e.getMessage());
+                if (callback != null) {
+                    callback.onError(fluidId.toString(), e);
+                }
+            }
+
+            if (callback != null) {
+                callback.onProgress(i + 1, total, fluidId.toString());
+            }
+
+            // Log progress
+            int percent = ((i + 1) * 100) / total;
+            if (percent % PROGRESS_PERCENT_INTERVAL == 0) {
+                LOGGER.info("RecipeFlow: Exported {}/{} fluid icons ({}%)", i + 1, total, percent);
+            }
+        }
+
+        LOGGER.info("RecipeFlow: Fluid icon export complete. {} icons exported.", metadata.size());
+        return metadata;
+    }
+
+    /**
+     * Export a single fluid's icon.
+     *
+     * @param fluid The fluid to export
+     * @param fluidId The fluid's resource location
+     * @param outputDir The output directory
+     * @return IconEntry with file information, or null on failure
+     */
+    public IconMetadata.IconEntry exportFluidIcon(Fluid fluid, ResourceLocation fluidId, Path outputDir) {
+        if (fluid == null || fluid == Fluids.EMPTY) {
+            return null;
+        }
+
+        String namespace = fluidId.getNamespace();
+        String fluidName = fluidId.getPath();
+
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException e) {
+            LOGGER.warn("RecipeFlow: Failed to create directory {}: {}", outputDir, e.getMessage());
+            return null;
+        }
+
+        boolean animated = fluidRenderer.isAnimated(fluid);
+
+        if (animated) {
+            return exportAnimatedFluidIcon(fluid, namespace, fluidName, outputDir);
+        } else {
+            return exportStaticFluidIcon(fluid, namespace, fluidName, outputDir);
+        }
+    }
+
+    /**
+     * Export a static (non-animated) fluid icon as PNG.
+     */
+    private IconMetadata.IconEntry exportStaticFluidIcon(Fluid fluid, String namespace, String fluidName, Path outputDir) {
+        String safeNamespace = namespace.replace("/", "_").replace("\\", "_");
+        String safeFluidName = fluidName.replace("/", "_").replace("\\", "_");
+        String filename = safeNamespace + "_" + safeFluidName + ".png";
+        Path filePath = outputDir.resolve(filename);
+
+        try {
+            BufferedImage image = fluidRenderer.renderFluid(fluid);
+            ImageIO.write(image, "PNG", filePath.toFile());
+
+            return IconMetadata.IconEntry.staticIcon(filename);
+        } catch (IOException e) {
+            LOGGER.warn("RecipeFlow: Failed to save fluid PNG {}: {}", filePath, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Export an animated fluid icon as GIF with proper per-frame timing.
+     */
+    private IconMetadata.IconEntry exportAnimatedFluidIcon(Fluid fluid, String namespace, String fluidName, Path outputDir) {
+        String safeNamespace = namespace.replace("/", "_").replace("\\", "_");
+        String safeFluidName = fluidName.replace("/", "_").replace("\\", "_");
+
+        AnimationSequence sequence = fluidRenderer.renderFluidAnimation(fluid);
+        List<BufferedImage> frames = sequence.frames();
+        List<Integer> frameDurations = sequence.frameDurationsMs();
+        int frameCount = frames.size();
+
+        // Calculate average frame time for metadata
+        int avgFrameTimeMs = frameDurations.stream().mapToInt(Integer::intValue).sum() / Math.max(1, frameCount);
+
+        // Save as animated GIF
+        String filename = safeNamespace + "_" + safeFluidName + ".gif";
+        Path filePath = outputDir.resolve(filename);
+
+        try {
+            saveAnimatedGif(frames, frameDurations, filePath);
+            LOGGER.debug("RecipeFlow: Saved animated GIF for fluid {}:{} with {} frames",
+                    namespace, fluidName, frameCount);
+            return IconMetadata.IconEntry.animatedIcon(filename, frameCount, avgFrameTimeMs);
+        } catch (IOException e) {
+            LOGGER.error("RecipeFlow: Failed to save animated GIF for fluid {}:{} - {}",
+                    namespace, fluidName, e.getMessage());
+        }
+
+        // Fallback: save static PNG
+        String pngFilename = safeNamespace + "_" + safeFluidName + ".png";
+        Path pngFilePath = outputDir.resolve(pngFilename);
+
+        try {
+            BufferedImage staticFrame = fluidRenderer.renderFluid(fluid);
+            ImageIO.write(staticFrame, "PNG", pngFilePath.toFile());
+            LOGGER.warn("RecipeFlow: Saved fallback PNG for animated fluid {}:{}", namespace, fluidName);
+            return IconMetadata.IconEntry.animatedIcon(pngFilename, frameCount, avgFrameTimeMs);
+        } catch (IOException e) {
+            LOGGER.error("RecipeFlow: Failed to save fallback PNG {}: {}", pngFilePath, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Export icons for a specific set of fluid IDs (useful for recipe-based export).
+     *
+     * @param fluidIds Set of fluid IDs to export (e.g., "minecraft:water")
+     * @param outputDir The directory to save icons to
+     * @param callback Progress callback (may be null)
+     * @return IconMetadata containing information about exported fluid icons
+     */
+    public IconMetadata exportFluidIcons(java.util.Set<String> fluidIds, Path outputDir, ExportCallback callback) {
+        IconMetadata metadata = new IconMetadata();
+
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException e) {
+            LOGGER.error("RecipeFlow: Failed to create output directory: {}", e.getMessage());
+            return metadata;
+        }
+
+        int total = fluidIds.size();
+        int current = 0;
+
+        LOGGER.info("RecipeFlow: Exporting {} fluid icons", total);
+
+        for (String fluidIdStr : fluidIds) {
+            current++;
+
+            ResourceLocation fluidId = ResourceLocation.tryParse(fluidIdStr);
+            if (fluidId == null) {
+                LOGGER.warn("RecipeFlow: Invalid fluid ID: {}", fluidIdStr);
+                continue;
+            }
+
+            Fluid fluid = ForgeRegistries.FLUIDS.getValue(fluidId);
+            if (fluid == null || fluid == Fluids.EMPTY) {
+                LOGGER.warn("RecipeFlow: Fluid not found: {}", fluidIdStr);
+                continue;
+            }
+
+            try {
+                IconMetadata.IconEntry iconEntry = exportFluidIcon(fluid, fluidId, outputDir);
+                if (iconEntry != null) {
+                    metadata.addIcon(fluidIdStr, iconEntry);
+                }
+            } catch (Exception e) {
+                LOGGER.warn("RecipeFlow: Failed to export fluid icon for {}: {}", fluidIdStr, e.getMessage());
+                if (callback != null) {
+                    callback.onError(fluidIdStr, e);
+                }
+            }
+
+            if (callback != null) {
+                callback.onProgress(current, total, fluidIdStr);
+            }
+        }
+
+        LOGGER.info("RecipeFlow: Exported {} fluid icons", metadata.size());
+        return metadata;
     }
 }

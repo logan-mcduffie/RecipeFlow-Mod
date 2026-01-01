@@ -37,6 +37,18 @@ public class GTCEuIconHelper {
 
     private static final Logger LOGGER = LogManager.getLogger();
 
+    // GTCEu tier constants (OpV = 13, MAX = 14)
+    public static final int TIER_OPV = 13;
+    public static final int TIER_MAX = 14;
+
+    // Color cycle speed for OpV tier (degrees of hue change per tick)
+    // From TooltipHelper.RAINBOW_HSL_SLOW = 1.25f
+    private static final float OPV_COLOR_CYCLE_SPEED = 1.25f;
+
+    // Number of ticks for a full 360° color cycle at RAINBOW_HSL_SLOW speed
+    // 360 / 1.25 = 288 ticks = 14.4 seconds
+    private static final int OPV_FULL_CYCLE_TICKS = (int) (360f / OPV_COLOR_CYCLE_SPEED);
+
     // GTCEu overlay texture base path
     private static final String OVERLAY_BASE = "gtceu:block/overlay/machine/";
 
@@ -102,6 +114,202 @@ public class GTCEuIconHelper {
      */
     private static boolean isGTCEuMachineInternal(ItemStack stack) {
         return stack.getItem() instanceof com.gregtechceu.gtceu.api.item.MetaMachineItem;
+    }
+
+    /**
+     * Get the tier of a GTCEu machine.
+     *
+     * @param stack The item stack to check
+     * @return The machine tier (0-14), or -1 if not a tiered machine
+     */
+    public static int getMachineTier(ItemStack stack) {
+        try {
+            return getMachineTierInternal(stack);
+        } catch (NoClassDefFoundError e) {
+            return -1;
+        } catch (Exception e) {
+            LOGGER.debug("RecipeFlow GTCEuIconHelper: Error getting machine tier: {}", e.getMessage());
+            return -1;
+        }
+    }
+
+    /**
+     * Internal method to get machine tier.
+     */
+    private static int getMachineTierInternal(ItemStack stack) {
+        if (!(stack.getItem() instanceof com.gregtechceu.gtceu.api.item.MetaMachineItem machineItem)) {
+            return -1;
+        }
+
+        com.gregtechceu.gtceu.api.machine.MachineDefinition definition = machineItem.getDefinition();
+        if (definition == null) {
+            return -1;
+        }
+
+        return definition.getTier();
+    }
+
+    /**
+     * Check if a machine uses time-based tint color cycling (like OPV tier).
+     *
+     * @param stack The item stack to check
+     * @return true if this machine has animated tint colors
+     */
+    public static boolean hasAnimatedTint(ItemStack stack) {
+        int tier = getMachineTier(stack);
+        // OpV (tier 13) and MAX (tier 14) use rainbow color cycling
+        return tier == TIER_OPV || tier == TIER_MAX;
+    }
+
+    /**
+     * Get the recommended frame count for capturing a machine's full animation,
+     * including both sprite animation and tint color cycling.
+     *
+     * @param stack The item stack to check
+     * @param baseSpriteFrames The number of sprite animation frames
+     * @return The recommended total frame count for GIF capture
+     */
+    public static int getRecommendedFrameCount(ItemStack stack, int baseSpriteFrames) {
+        if (!hasAnimatedTint(stack)) {
+            return baseSpriteFrames;
+        }
+
+        // For OPV/MAX tier, we need enough frames to show the color cycle
+        // A full cycle is 288 ticks at 1.25 deg/tick
+        // For a reasonable GIF size, capture ~72 frames (every 4 ticks = 5 FPS equivalent)
+        // This gives a ~3.6 second loop through the full rainbow
+        int colorCycleFrames = 72;
+
+        // Return the LCM of sprite frames and color cycle frames for smooth looping
+        // But cap it to prevent enormous GIFs
+        int combined = lcm(baseSpriteFrames, colorCycleFrames);
+        return Math.min(combined, 144); // Cap at 144 frames (~7 seconds at 20 FPS)
+    }
+
+    /**
+     * Get the tick interval between frames for OPV color cycling.
+     * This determines how much to advance CLIENT_TIME between captures.
+     *
+     * @return Ticks to advance between frames (4 ticks = capture every 200ms for smooth color)
+     */
+    public static int getColorCycleTickInterval() {
+        return 4; // Every 4 ticks = 5° of hue change per frame
+    }
+
+    /**
+     * Get the frame duration in milliseconds for OPV color cycling GIFs.
+     *
+     * @return Frame duration in ms (200ms = 5 FPS for color cycling)
+     */
+    public static int getColorCycleFrameDurationMs() {
+        return getColorCycleTickInterval() * 50; // 50ms per tick
+    }
+
+    /**
+     * Calculate least common multiple.
+     */
+    private static int lcm(int a, int b) {
+        return (a * b) / gcd(a, b);
+    }
+
+    /**
+     * Calculate greatest common divisor.
+     */
+    private static int gcd(int a, int b) {
+        while (b != 0) {
+            int temp = b;
+            b = a % b;
+            a = temp;
+        }
+        return a;
+    }
+
+    // Cached CLIENT_TIME field for reflection access
+    private static java.lang.reflect.Field clientTimeField = null;
+    private static boolean clientTimeFieldSearched = false;
+
+    /**
+     * Get the current GTValues.CLIENT_TIME value.
+     *
+     * @return The current client time, or -1 if unavailable
+     */
+    public static long getClientTime() {
+        try {
+            return getClientTimeInternal();
+        } catch (NoClassDefFoundError e) {
+            return -1;
+        } catch (Exception e) {
+            LOGGER.debug("RecipeFlow GTCEuIconHelper: Error getting CLIENT_TIME: {}", e.getMessage());
+            return -1;
+        }
+    }
+
+    private static long getClientTimeInternal() throws Exception {
+        if (!clientTimeFieldSearched) {
+            clientTimeFieldSearched = true;
+            try {
+                Class<?> gtValuesClass = Class.forName("com.gregtechceu.gtceu.api.GTValues");
+                clientTimeField = gtValuesClass.getDeclaredField("CLIENT_TIME");
+                clientTimeField.setAccessible(true);
+            } catch (Exception e) {
+                LOGGER.debug("RecipeFlow GTCEuIconHelper: Could not find CLIENT_TIME field: {}", e.getMessage());
+            }
+        }
+
+        if (clientTimeField == null) {
+            return -1;
+        }
+
+        return clientTimeField.getLong(null);
+    }
+
+    /**
+     * Set the GTValues.CLIENT_TIME value for animation capture.
+     * IMPORTANT: This should only be used during capture and restored afterward!
+     *
+     * @param time The time value to set
+     * @return true if successful
+     */
+    public static boolean setClientTime(long time) {
+        try {
+            return setClientTimeInternal(time);
+        } catch (NoClassDefFoundError e) {
+            return false;
+        } catch (Exception e) {
+            LOGGER.debug("RecipeFlow GTCEuIconHelper: Error setting CLIENT_TIME: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean setClientTimeInternal(long time) throws Exception {
+        if (!clientTimeFieldSearched) {
+            getClientTimeInternal(); // Initialize the field
+        }
+
+        if (clientTimeField == null) {
+            return false;
+        }
+
+        clientTimeField.setLong(null, time);
+        return true;
+    }
+
+    /**
+     * Advance CLIENT_TIME by the specified number of ticks.
+     * Used for simulating time progression during animation capture.
+     *
+     * @param ticks Number of ticks to advance
+     * @return The new CLIENT_TIME value, or -1 on failure
+     */
+    public static long advanceClientTime(int ticks) {
+        long current = getClientTime();
+        if (current < 0) return -1;
+
+        long newTime = current + ticks;
+        if (setClientTime(newTime)) {
+            return newTime;
+        }
+        return -1;
     }
 
     /**

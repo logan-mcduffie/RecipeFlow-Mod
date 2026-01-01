@@ -6,7 +6,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.recipeflow.mod.v120plus.util.AnimatedIconRenderer;
-import com.recipeflow.mod.v120plus.util.GTCEuIconHelper;
+import com.recipeflow.mod.v120plus.util.SimpleRenderModeHelper;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -20,6 +20,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.model.data.ModelData;
@@ -33,6 +35,7 @@ import java.util.Set;
 import java.util.stream.StreamSupport;
 
 import com.recipeflow.mod.v120plus.util.IconExporter;
+import com.recipeflow.mod.v120plus.util.FluidIconRenderer;
 import com.recipeflow.mod.core.export.IconMetadata;
 
 import javax.imageio.ImageIO;
@@ -43,7 +46,11 @@ import java.nio.file.Path;
 /**
  * Debug command for testing icon rendering.
  * Usage: /recipeflow debugicon <item_id>
- * Example: /recipeflow debugicon gtceu:lv_wiremill
+ * Example: /recipeflow debugicon gtceu:luv_fusion_reactor
+ *
+ * This command demonstrates the same rendering path used by the mass export.
+ * When GTCEu's SimpleRenderMode API is available, it enables simple rendering
+ * to ensure animated textures render correctly for capture.
  *
  * Renders the specified item and saves it to config/recipeflow/debug/
  */
@@ -85,6 +92,34 @@ public class DebugIconCommand {
     };
 
     /**
+     * Suggestion provider for fluid IDs with tab completion.
+     * Suggests all registered fluids, filtering by what the user has typed.
+     */
+    private static final SuggestionProvider<CommandSourceStack> FLUID_SUGGESTIONS = (context, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase();
+
+        // Get all fluid IDs from the registry
+        Iterable<ResourceLocation> fluidIds = ForgeRegistries.FLUIDS.getKeys();
+
+        // Filter and suggest matching fluids
+        return SharedSuggestionProvider.suggest(
+            StreamSupport.stream(fluidIds.spliterator(), false)
+                .map(ResourceLocation::toString)
+                .filter(id -> id.toLowerCase().contains(remaining))
+                .sorted((a, b) -> {
+                    // Prioritize fluids that start with the typed text
+                    boolean aStarts = a.toLowerCase().startsWith(remaining);
+                    boolean bStarts = b.toLowerCase().startsWith(remaining);
+                    if (aStarts && !bStarts) return -1;
+                    if (!aStarts && bStarts) return 1;
+                    return a.compareTo(b);
+                })
+                .limit(50), // Limit suggestions to avoid overwhelming the UI
+            builder
+        );
+    };
+
+    /**
      * Register the debugicon subcommand.
      */
     public static void registerSubcommand(LiteralArgumentBuilder<CommandSourceStack> parent) {
@@ -93,29 +128,11 @@ public class DebugIconCommand {
                         .suggests(ITEM_SUGGESTIONS)
                         .executes(DebugIconCommand::executeDebugIcon)));
 
-        // Add GTCEu texture scan command
-        parent.then(Commands.literal("scangtceu")
-                .executes(DebugIconCommand::executeScanGTCEu));
-    }
-
-    /**
-     * Scan for GTCEu overlay textures to discover what's available.
-     */
-    private static int executeScanGTCEu(CommandContext<CommandSourceStack> context) {
-        CommandSourceStack source = context.getSource();
-        sendMessage(source, "Scanning for GTCEu overlay textures... (check logs for results)");
-
-        Minecraft.getInstance().execute(() -> {
-            try {
-                GTCEuIconHelper.debugScanOverlayTextures();
-                sendSuccess(source, "Scan complete. Check latest.log for results.");
-            } catch (Exception e) {
-                LOGGER.error("Failed to scan GTCEu textures", e);
-                sendError(source, "Scan failed: " + e.getMessage());
-            }
-        });
-
-        return Command.SINGLE_SUCCESS;
+        // Register debugfluid subcommand
+        parent.then(Commands.literal("debugfluid")
+                .then(Commands.argument("fluid", StringArgumentType.greedyString())
+                        .suggests(FLUID_SUGGESTIONS)
+                        .executes(DebugIconCommand::executeDebugFluid)));
     }
 
     /**
@@ -149,6 +166,13 @@ public class DebugIconCommand {
 
         sendMessage(source, "Rendering icon for: " + itemIdStr);
 
+        // Log SimpleRenderMode availability
+        if (SimpleRenderModeHelper.isAvailable()) {
+            sendMessage(source, "GTCEu SimpleRenderMode: available");
+        } else {
+            sendMessage(source, "GTCEu SimpleRenderMode: not available (GTCEu not installed or old version)");
+        }
+
         // Run on render thread
         Minecraft.getInstance().execute(() -> {
             try {
@@ -164,6 +188,7 @@ public class DebugIconCommand {
 
     /**
      * Render and save the icon.
+     * Uses SimpleRenderMode when available for proper GTCEu machine animation capture.
      */
     private static void renderAndSaveIcon(CommandSourceStack source, ItemStack stack, ResourceLocation itemId) {
         AnimatedIconRenderer renderer = new AnimatedIconRenderer();
@@ -182,7 +207,7 @@ public class DebugIconCommand {
             sendMessage(source, "Item Model Sprites:");
             Set<TextureAtlasSprite> sprites = new HashSet<>();
 
-            // Particle icon (use Forge's extended getParticleIcon with ModelData for mod compatibility)
+            // Particle icon
             TextureAtlasSprite particleIcon = model.getParticleIcon(ModelData.EMPTY);
             if (particleIcon != null) {
                 sprites.add(particleIcon);
@@ -190,7 +215,7 @@ public class DebugIconCommand {
                 sendMessage(source, "  particle: " + particleIcon.contents().name() + " (" + frames + " frames)");
             }
 
-            // Null direction quads (use Forge's extended getQuads with ModelData for mod compatibility)
+            // Null direction quads
             RandomSource random = RandomSource.create();
             List<BakedQuad> nullQuads = model.getQuads(null, null, random, ModelData.EMPTY, null);
             sendMessage(source, "  nullQuads count: " + nullQuads.size());
@@ -216,47 +241,6 @@ public class DebugIconCommand {
 
             sendMessage(source, "  total unique item sprites: " + sprites.size());
 
-            // Also check block model if this is a BlockItem
-            if (stack.getItem() instanceof net.minecraft.world.item.BlockItem blockItem) {
-                sendMessage(source, "Block Model Sprites:");
-                var block = blockItem.getBlock();
-                var defaultState = block.defaultBlockState();
-                var blockRenderer = Minecraft.getInstance().getBlockRenderer();
-                BakedModel blockModel = blockRenderer.getBlockModel(defaultState);
-
-                Set<TextureAtlasSprite> blockSprites = new HashSet<>();
-
-                TextureAtlasSprite blockParticle = blockModel.getParticleIcon(ModelData.EMPTY);
-                if (blockParticle != null) {
-                    blockSprites.add(blockParticle);
-                    long frames = blockParticle.contents().getUniqueFrames().count();
-                    sendMessage(source, "  particle: " + blockParticle.contents().name() + " (" + frames + " frames)");
-                }
-
-                List<BakedQuad> blockNullQuads = blockModel.getQuads(defaultState, null, random, ModelData.EMPTY, null);
-                sendMessage(source, "  nullQuads count: " + blockNullQuads.size());
-                for (BakedQuad quad : blockNullQuads) {
-                    TextureAtlasSprite sprite = quad.getSprite();
-                    if (sprite != null && blockSprites.add(sprite)) {
-                        long frames = sprite.contents().getUniqueFrames().count();
-                        sendMessage(source, "    quad: " + sprite.contents().name() + " (" + frames + " frames)");
-                    }
-                }
-
-                for (Direction dir : Direction.values()) {
-                    List<BakedQuad> dirQuads = blockModel.getQuads(defaultState, dir, random, ModelData.EMPTY, null);
-                    for (BakedQuad quad : dirQuads) {
-                        TextureAtlasSprite sprite = quad.getSprite();
-                        if (sprite != null && blockSprites.add(sprite)) {
-                            long frames = sprite.contents().getUniqueFrames().count();
-                            sendMessage(source, "    " + dir + ": " + sprite.contents().name() + " (" + frames + " frames)");
-                        }
-                    }
-                }
-
-                sendMessage(source, "  total unique block sprites: " + blockSprites.size());
-            }
-
             // Check if animated
             boolean isAnimated = renderer.isAnimated(stack);
             int frameCount = renderer.getFrameCount(stack);
@@ -267,29 +251,36 @@ public class DebugIconCommand {
             Path debugDir = Path.of("config", "recipeflow", "debug");
             debugDir.toFile().mkdirs();
 
-            if (isAnimated) {
-                // Use IconExporter to save as GIF
-                sendMessage(source, "Exporting as animated GIF...");
-                IconExporter exporter = new IconExporter();
-                IconMetadata.IconEntry entry = exporter.exportIcon(stack, itemId, debugDir);
+            // Enable SimpleRenderMode for the actual export
+            // This ensures GTCEu machines render with normal animation instead of emissive effects
+            SimpleRenderModeHelper.enable();
+            try {
+                if (isAnimated) {
+                    // Use IconExporter to save as GIF
+                    sendMessage(source, "Exporting as animated GIF (with SimpleRenderMode)...");
+                    IconExporter exporter = new IconExporter();
+                    IconMetadata.IconEntry entry = exporter.exportIcon(stack, itemId, debugDir);
 
-                if (entry != null) {
-                    sendSuccess(source, "Saved to: " + debugDir.resolve(entry.getFilename()).toAbsolutePath());
-                    sendMessage(source, "Format: " + (entry.getFilename().endsWith(".gif") ? "Animated GIF" : "PNG (fallback)"));
-                    sendMessage(source, "Frames: " + entry.getFrameCount());
+                    if (entry != null) {
+                        sendSuccess(source, "Saved to: " + debugDir.resolve(entry.getFilename()).toAbsolutePath());
+                        sendMessage(source, "Format: " + (entry.getFilename().endsWith(".gif") ? "Animated GIF" : "PNG (fallback)"));
+                        sendMessage(source, "Frames: " + entry.getFrameCount());
+                    } else {
+                        sendError(source, "Failed to export animated icon");
+                    }
                 } else {
-                    sendError(source, "Failed to export animated icon");
+                    // Render static PNG
+                    BufferedImage image = renderer.renderItem(stack);
+                    String filename = itemId.getNamespace() + "_" + itemId.getPath().replace("/", "_") + ".png";
+                    File outputFile = debugDir.resolve(filename).toFile();
+
+                    ImageIO.write(image, "PNG", outputFile);
+
+                    sendSuccess(source, "Saved to: " + outputFile.getAbsolutePath());
+                    sendMessage(source, "Image size: " + image.getWidth() + "x" + image.getHeight());
                 }
-            } else {
-                // Render static PNG
-                BufferedImage image = renderer.renderItem(stack);
-                String filename = itemId.getNamespace() + "_" + itemId.getPath().replace("/", "_") + ".png";
-                File outputFile = debugDir.resolve(filename).toFile();
-
-                ImageIO.write(image, "PNG", outputFile);
-
-                sendSuccess(source, "Saved to: " + outputFile.getAbsolutePath());
-                sendMessage(source, "Image size: " + image.getWidth() + "x" + image.getHeight());
+            } finally {
+                SimpleRenderModeHelper.disable();
             }
 
         } catch (Exception e) {
@@ -297,6 +288,98 @@ public class DebugIconCommand {
             sendError(source, "Render failed: " + e.getMessage());
         } finally {
             renderer.dispose();
+        }
+    }
+
+    /**
+     * Execute the debug fluid command.
+     */
+    private static int executeDebugFluid(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        String fluidIdStr = StringArgumentType.getString(context, "fluid");
+
+        // Parse fluid ID
+        ResourceLocation fluidId;
+        try {
+            fluidId = ResourceLocation.tryParse(fluidIdStr);
+            if (fluidId == null) {
+                sendError(source, "Invalid fluid ID format: " + fluidIdStr);
+                return 0;
+            }
+        } catch (Exception e) {
+            sendError(source, "Invalid fluid ID format: " + fluidIdStr);
+            return 0;
+        }
+
+        // Look up fluid
+        Fluid fluid = ForgeRegistries.FLUIDS.getValue(fluidId);
+        if (fluid == null || fluid == Fluids.EMPTY) {
+            sendError(source, "Fluid not found: " + fluidIdStr);
+            return 0;
+        }
+
+        sendMessage(source, "Rendering fluid icon for: " + fluidIdStr);
+
+        // Run on render thread
+        Minecraft.getInstance().execute(() -> {
+            try {
+                renderAndSaveFluidIcon(source, fluid, fluidId);
+            } catch (Exception e) {
+                LOGGER.error("Failed to render debug fluid icon", e);
+                sendError(source, "Failed to render: " + e.getMessage());
+            }
+        });
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * Render and save the fluid icon.
+     */
+    private static void renderAndSaveFluidIcon(CommandSourceStack source, Fluid fluid, ResourceLocation fluidId) {
+        FluidIconRenderer fluidRenderer = new FluidIconRenderer();
+
+        try {
+            // Get fluid sprite info for debugging
+            var sprite = fluidRenderer.getFluidSprite(fluid);
+            int tintColor = fluidRenderer.getFluidTintColor(fluid);
+
+            sendMessage(source, "Fluid info:");
+            if (sprite != null) {
+                sendMessage(source, "  sprite: " + sprite.contents().name());
+                long frames = sprite.contents().getUniqueFrames().count();
+                sendMessage(source, "  frames: " + frames);
+                sendMessage(source, "  size: " + sprite.contents().width() + "x" + sprite.contents().height());
+            } else {
+                sendMessage(source, "  sprite: not found");
+            }
+            sendMessage(source, "  tintColor: 0x" + Integer.toHexString(tintColor).toUpperCase());
+
+            // Check if animated
+            boolean isAnimated = fluidRenderer.isAnimated(fluid);
+            sendMessage(source, "  isAnimated: " + isAnimated);
+
+            // Save to debug directory
+            Path debugDir = Path.of("config", "recipeflow", "debug");
+            debugDir.toFile().mkdirs();
+
+            IconExporter exporter = new IconExporter();
+            IconMetadata.IconEntry entry = exporter.exportFluidIcon(fluid, fluidId, debugDir);
+
+            if (entry != null) {
+                sendSuccess(source, "Saved to: " + debugDir.resolve(entry.getFilename()).toAbsolutePath());
+                sendMessage(source, "Format: " + (entry.getFilename().endsWith(".gif") ? "Animated GIF" : "PNG"));
+                if (isAnimated) {
+                    sendMessage(source, "Frames: " + entry.getFrameCount());
+                    sendMessage(source, "Frame time: " + entry.getFrameTimeMs() + "ms");
+                }
+            } else {
+                sendError(source, "Failed to export fluid icon");
+            }
+
+        } catch (Exception e) {
+            LOGGER.error("Failed to render debug fluid icon for " + fluidId, e);
+            sendError(source, "Render failed: " + e.getMessage());
         }
     }
 

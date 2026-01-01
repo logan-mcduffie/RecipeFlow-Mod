@@ -1,12 +1,8 @@
 plugins {
-    id("net.minecraftforge.gradle") version "6.0.+"
-    id("org.spongepowered.mixin") version "0.7.+"
+    id("java")
+    alias(libs.plugins.modDevGradle)
 }
 
-val minecraft_version: String by project
-val forge_version: String by project
-val mapping_channel: String by project
-val mapping_version: String by project
 val mod_id: String by project
 val mod_name: String by project
 val mod_version: String by project
@@ -17,34 +13,27 @@ java {
     }
 }
 
-minecraft {
-    mappings(mapping_channel, mapping_version)
+legacyForge {
+    version = libs.versions.minecraftForge.get()
+
+    parchment {
+        minecraftVersion = libs.versions.minecraft.get()
+        mappingsVersion = libs.versions.parchment.get()
+    }
 
     runs {
         create("client") {
-            workingDirectory(project.file("run"))
-            property("forge.logging.markers", "REGISTRIES")
-            property("forge.logging.console.level", "debug")
-
-            mods {
-                create(mod_id) {
-                    source(sourceSets.main.get())
-                    source(project(":core").sourceSets.main.get())
-                }
-            }
+            client()
         }
-
         create("server") {
-            workingDirectory(project.file("run"))
-            property("forge.logging.markers", "REGISTRIES")
-            property("forge.logging.console.level", "debug")
+            server()
+        }
+    }
 
-            mods {
-                create(mod_id) {
-                    source(sourceSets.main.get())
-                    source(project(":core").sourceSets.main.get())
-                }
-            }
+    mods {
+        create(mod_id) {
+            sourceSet(sourceSets.main.get())
+            sourceSet(project(":core").sourceSets.main.get())
         }
     }
 }
@@ -55,8 +44,12 @@ repositories {
         url = uri("https://maven.gtceu.com")
     }
     maven {
-        name = "Kotlin for Forge"
-        url = uri("https://thedarkcolour.github.io/KotlinForForge/")
+        name = "LDLib / lowdragmc"
+        url = uri("https://maven.firstdark.dev/releases")
+    }
+    maven {
+        name = "FirstDark Snapshots"
+        url = uri("https://maven.firstdark.dev/snapshots")
     }
     maven {
         name = "TerraformersMC"
@@ -75,47 +68,33 @@ repositories {
         url = uri("https://maven.tterrag.com/")
     }
     maven {
-        name = "FirstDark Snapshots"
-        url = uri("https://maven.firstdark.dev/snapshots")
-    }
-    maven {
         name = "ModMaven"
         url = uri("https://modmaven.dev")
-    }
-    maven {
-        name = "Cursemaven"
-        url = uri("https://cursemaven.com")
     }
     maven {
         name = "Shedaniel"
         url = uri("https://maven.shedaniel.me/")
     }
-}
-
-mixin {
-    add(sourceSets.main.get(), "recipeflow.refmap.json")
-    config("recipeflow.mixins.json")
+    maven {
+        name = "Cursemaven"
+        url = uri("https://cursemaven.com")
+    }
 }
 
 dependencies {
-    minecraft("net.minecraftforge:forge:${minecraft_version}-${forge_version}")
-
     implementation(project(":core"))
 
-    // Mixin annotation processor
-    annotationProcessor("org.spongepowered:mixin:0.8.5:processor")
+    // GTCEu Modern - now compatible in dev with Parchment mappings
+    compileOnly("com.gregtechceu.gtceu:gtceu-${libs.versions.minecraft.get()}:${libs.versions.gtceu.get()}")
 
-    // GTCEu Modern - compileOnly (can't run in dev due to SRG mapping conflicts)
-    compileOnly("com.gregtechceu.gtceu:gtceu-${minecraft_version}:${property("gtceu_version")}")
+    // EMI
+    compileOnly("dev.emi:emi-forge:${libs.versions.emi.get()}+${libs.versions.minecraft.get()}")
 
-    // EMI - compileOnly
-    compileOnly("dev.emi:emi-forge:${property("emi_version")}+${minecraft_version}")
-
-    // JEI - compileOnly (can't run in dev due to SRG mapping conflicts)
-    compileOnly("mezz.jei:jei-${minecraft_version}-forge:15.20.0.121")
+    // JEI
+    compileOnly("mezz.jei:jei-${libs.versions.minecraft.get()}-forge:${libs.versions.jei.get()}")
 
     // WebP support for animated icon export
-    implementation("org.sejda.imageio:webp-imageio:0.1.6")
+    implementation("org.sejda.imageio:webp-imageio:${libs.versions.webpImageio.get()}")
 }
 
 tasks.withType<JavaCompile> {
@@ -136,17 +115,6 @@ tasks.jar {
     // Include core classes in the jar
     from(project(":core").sourceSets.main.get().output)
 
-    // Set the archive base name to something more descriptive
+    // Set the archive base name
     archiveBaseName.set("recipeflow")
-}
-
-// reobfJar modifies the jar in libs/ in place, so after build,
-// build/libs/recipeflow-1.0.0.jar IS the reobfuscated production jar
-tasks.named("build") {
-    dependsOn("reobfJar")
-}
-
-// Disable jarJar - we don't need it
-tasks.named<net.minecraftforge.gradle.userdev.tasks.JarJar>("jarJar") {
-    enabled = false
 }

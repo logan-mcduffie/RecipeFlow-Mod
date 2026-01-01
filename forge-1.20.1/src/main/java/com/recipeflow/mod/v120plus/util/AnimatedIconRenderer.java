@@ -661,15 +661,709 @@ public class AnimatedIconRenderer {
     }
 
     /**
+     * Render animation using DIRECT FRAME EXTRACTION from sprite source images.
+     * This bypasses the texture atlas animation system entirely by:
+     * 1. Rendering the item once to get the base 3D render
+     * 2. Extracting each animation frame directly from the sprite's source NativeImage
+     * 3. Compositing the overlay frames onto the base render
+     *
+     * This is the most reliable method for mods like GTCEu that use custom rendering
+     * pipelines where uploadFrame() doesn't produce visible results.
+     *
+     * @param stack The item stack to render
+     * @return AnimationSequence with rendered frames
+     */
+    public AnimationSequence renderAnimationSequenceDirectExtraction(ItemStack stack) {
+        List<BufferedImage> sequenceFrames = new ArrayList<>();
+        List<Integer> frameDurations = new ArrayList<>();
+
+        if (stack.isEmpty()) {
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Get the animated sprite (the one with most frames)
+        TextureAtlasSprite animatedSprite = getAnimatedSprite(stack);
+        if (animatedSprite == null) {
+            LOGGER.info("RecipeFlow DirectExtraction: No animated sprite found for {}", stack.getItem());
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        String spriteName = animatedSprite.contents().name().toString();
+        LOGGER.info("RecipeFlow DirectExtraction: Using sprite {} for {}", spriteName, stack.getItem());
+
+        // Extract frames directly from the sprite's source image
+        DirectFrameExtractor.ExtractionResult extraction = DirectFrameExtractor.extractFrames(animatedSprite);
+
+        if (!extraction.success()) {
+            LOGGER.warn("RecipeFlow DirectExtraction: Failed to extract frames for {}: {}",
+                    stack.getItem(), extraction.errorMessage());
+            // Fall back to single rendered frame
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        LOGGER.info("RecipeFlow DirectExtraction: Extracted {} frames ({}x{}) for {}",
+                extraction.frameCount(), extraction.spriteWidth(), extraction.spriteHeight(), stack.getItem());
+
+        // Render the base item (this will show frame 0 of the animation)
+        BufferedImage baseRender = renderItem(stack);
+        int iconSize = baseRender.getWidth();
+
+        // For each extracted frame, we have two options:
+        // Option A: Return the raw sprite frames (flat 2D textures)
+        // Option B: Composite the frames onto the base render (preserves 3D appearance)
+        //
+        // For now, we'll use Option A with scaling since it's simpler and works
+        // for most cases. Option B would require knowing exactly where the overlay
+        // appears on the rendered item, which varies by item/model.
+
+        for (int i = 0; i < extraction.frameCount(); i++) {
+            BufferedImage frame = extraction.frames().get(i);
+            int durationMs = extraction.frameDurationsMs().get(i);
+
+            // Scale the extracted frame to match the icon size
+            BufferedImage scaledFrame = DirectFrameExtractor.scale(frame, iconSize, iconSize);
+
+            // For now, just use the base render for each frame since we can't
+            // easily composite the overlay at the correct position.
+            // The animation comes from the texture variation.
+            //
+            // TODO: Implement proper compositing by:
+            // 1. Determining overlay position on the rendered item
+            // 2. Masking the overlay region
+            // 3. Compositing the new frame onto that region
+            sequenceFrames.add(scaledFrame);
+            frameDurations.add(durationMs);
+        }
+
+        // If we only got sprite frames (not full renders), log that
+        if (!sequenceFrames.isEmpty()) {
+            LOGGER.info("RecipeFlow DirectExtraction: Returning {} extracted frames for {} " +
+                    "(sprite frames only, not full 3D renders)",
+                    sequenceFrames.size(), stack.getItem());
+        }
+
+        return new AnimationSequence(sequenceFrames, frameDurations);
+    }
+
+    /**
+     * Render animation by MODIFYING THE SOURCE NATIVEIMAGE before each render.
+     *
+     * This works by:
+     * 1. Getting the source NativeImage which contains all frames as a vertical strip
+     * 2. For each animation frame, copy that frame's pixels to the frame 0 position
+     * 3. Render the item (which will now show the modified frame)
+     * 4. Restore frame 0's original pixels
+     *
+     * This is the most accurate method because it uses the actual rendering pipeline
+     * with the correct perspective transforms, lighting, and compositing.
+     *
+     * @param stack The item stack to render
+     * @return AnimationSequence with rendered frames
+     */
+    public AnimationSequence renderAnimationSequenceDirectComposite(ItemStack stack) {
+        List<BufferedImage> sequenceFrames = new ArrayList<>();
+        List<Integer> frameDurations = new ArrayList<>();
+
+        if (stack.isEmpty()) {
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Get ALL animated sprites for this item
+        List<TextureAtlasSprite> animatedSprites = getAllAnimatedSprites(stack);
+        if (animatedSprites.isEmpty()) {
+            LOGGER.info("RecipeFlow DirectComposite: No animated sprites found for {}", stack.getItem());
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Find the sprite with the most frames to determine animation length
+        TextureAtlasSprite primarySprite = null;
+        int maxFrameCount = 0;
+        com.mojang.blaze3d.platform.NativeImage primarySourceImage = null;
+        SpriteAnimationMetadata.FrameTimingInfo primaryTiming = null;
+
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            if (timing.isAnimated() && timing.frameCount() > maxFrameCount) {
+                com.mojang.blaze3d.platform.NativeImage sourceImage = ObfuscationHelper.getOriginalImage(sprite.contents());
+                if (sourceImage != null) {
+                    maxFrameCount = timing.frameCount();
+                    primarySprite = sprite;
+                    primarySourceImage = sourceImage;
+                    primaryTiming = timing;
+                }
+            }
+        }
+
+        if (primarySprite == null || primarySourceImage == null) {
+            LOGGER.warn("RecipeFlow DirectComposite: Could not get source image from any sprite for {}",
+                    stack.getItem());
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        int spriteWidth = primarySprite.contents().width();
+        int spriteHeight = primarySprite.contents().height();
+
+        LOGGER.info("RecipeFlow DirectComposite: Primary sprite {} has {} frames ({}x{}), source image {}x{}",
+                primarySprite.contents().name(), maxFrameCount, spriteWidth, spriteHeight,
+                primarySourceImage.getWidth(), primarySourceImage.getHeight());
+
+        // Collect source images for all animated sprites
+        // The source image contains all frames stacked vertically
+        List<com.mojang.blaze3d.platform.NativeImage> sourceImages = new ArrayList<>();
+        List<Integer> spriteWidths = new ArrayList<>();
+        List<Integer> spriteHeights = new ArrayList<>();
+
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            com.mojang.blaze3d.platform.NativeImage sourceImage = ObfuscationHelper.getOriginalImage(sprite.contents());
+
+            if (sourceImage == null) {
+                LOGGER.warn("RecipeFlow DirectComposite: No source image for sprite {}", sprite.contents().name());
+                continue;
+            }
+
+            int w = sprite.contents().width();
+            int h = sprite.contents().height();
+
+            sourceImages.add(sourceImage);
+            spriteWidths.add(w);
+            spriteHeights.add(h);
+
+            LOGGER.info("RecipeFlow DirectComposite: Sprite {} - sourceImage {}x{}, sprite dims {}x{}",
+                    sprite.contents().name(), sourceImage.getWidth(), sourceImage.getHeight(), w, h);
+        }
+
+        LOGGER.info("RecipeFlow DirectComposite: Prepared {} sprites for frame swapping", sourceImages.size());
+
+        // Create debug output folder named after the item
+        String itemName = stack.getItem().toString().replaceAll("[:/]", "_");
+        java.io.File debugDir = new java.io.File("recipeflow_debug", itemName);
+        debugDir.mkdirs();
+        LOGGER.info("RecipeFlow DirectComposite: Debug output folder: {}", debugDir.getAbsolutePath());
+
+        // Debug: save full source images (vertical strips containing all frames) for visual inspection
+        try {
+            for (int i = 0; i < animatedSprites.size(); i++) {
+                if (i >= sourceImages.size()) continue;
+                TextureAtlasSprite sprite = animatedSprites.get(i);
+                com.mojang.blaze3d.platform.NativeImage sourceImage = sourceImages.get(i);
+                BufferedImage fullStrip = DirectFrameExtractor.nativeImageToBufferedImage(sourceImage);
+                if (fullStrip != null) {
+                    String spriteName = sprite.contents().name().toString().replaceAll("[:/]", "_");
+                    java.io.File outFile = new java.io.File(debugDir, "source_" + spriteName + "_fullstrip.png");
+                    javax.imageio.ImageIO.write(fullStrip, "PNG", outFile);
+                    LOGGER.info("RecipeFlow DirectComposite: Saved full source strip to {}", outFile.getAbsolutePath());
+                }
+            }
+        } catch (Exception debugEx) {
+            LOGGER.warn("RecipeFlow DirectComposite: Failed to save debug strips: {}", debugEx.getMessage());
+        }
+
+        // Use timing from primary sprite
+        List<Integer> durations = primaryTiming.frameDurationsMs();
+        List<Integer> frameIndices = primaryTiming.frameIndices();
+
+        // Get the texture atlas for uploading
+        var textureManager = minecraft.getTextureManager();
+        var blockAtlasTexture = textureManager.getTexture(InventoryMenu.BLOCK_ATLAS);
+        int atlasTextureId = blockAtlasTexture != null ? blockAtlasTexture.getId() : -1;
+
+        LOGGER.info("RecipeFlow DirectComposite: Atlas texture ID = {}, atlas class = {}",
+                atlasTextureId, blockAtlasTexture != null ? blockAtlasTexture.getClass().getName() : "null");
+
+        // For each frame in the animation sequence
+        for (int seqIdx = 0; seqIdx < maxFrameCount; seqIdx++) {
+            int frameIndex = seqIdx < frameIndices.size() ? frameIndices.get(seqIdx) : seqIdx;
+
+            // For each sprite, upload frame N directly from the source image to the atlas
+            // The source image has all frames stacked vertically, so we upload from y offset
+            for (int i = 0; i < animatedSprites.size(); i++) {
+                if (i >= sourceImages.size()) continue;
+
+                TextureAtlasSprite sprite = animatedSprites.get(i);
+                com.mojang.blaze3d.platform.NativeImage sourceImage = sourceImages.get(i);
+                int w = spriteWidths.get(i);
+                int h = spriteHeights.get(i);
+
+                // Calculate y offset for this frame in the vertical strip
+                int srcYOffset = frameIndex * h;
+
+                // Upload directly from the source image at the frame's y offset
+                // to the atlas at the sprite's position
+                // NativeImage.upload(mipLevel, atlasX, atlasY, srcX, srcY, width, height, blur, clamp)
+                if (atlasTextureId != -1 && srcYOffset + h <= sourceImage.getHeight()) {
+                    RenderSystem.bindTexture(atlasTextureId);
+                    sourceImage.upload(0, sprite.getX(), sprite.getY(), 0, srcYOffset, w, h, false, false);
+
+                    // Debug: check corner pixels from this frame to verify frames are different
+                    int debugPixelTopLeft = sourceImage.getPixelRGBA(0, srcYOffset);
+                    int debugPixelBottomRight = sourceImage.getPixelRGBA(w-1, srcYOffset + h - 1);
+                    int debugPixelCenter = sourceImage.getPixelRGBA(w/2, srcYOffset + h/2);
+
+                    if (seqIdx == 0 || seqIdx == 1 || seqIdx == 2) {
+                        LOGGER.info("RecipeFlow DirectComposite: Frame {} - uploading from sourceImage y={} to atlas ({}, {}) for {}",
+                                frameIndex, srcYOffset, sprite.getX(), sprite.getY(), sprite.contents().name());
+                        LOGGER.info("RecipeFlow DirectComposite: Frame {} pixels - TL=0x{}, BR=0x{}, C=0x{}",
+                                frameIndex, Integer.toHexString(debugPixelTopLeft),
+                                Integer.toHexString(debugPixelBottomRight), Integer.toHexString(debugPixelCenter));
+
+                        // Save extracted frame as PNG for visual debugging
+                        try {
+                            BufferedImage frameImg = DirectFrameExtractor.extractRegion(sourceImage, 0, srcYOffset, w, h);
+                            if (frameImg != null) {
+                                String spriteName = sprite.contents().name().toString().replaceAll("[:/]", "_");
+                                java.io.File outFile = new java.io.File(debugDir, "extracted_" + spriteName + "_frame" + frameIndex + ".png");
+                                javax.imageio.ImageIO.write(frameImg, "PNG", outFile);
+                                LOGGER.info("RecipeFlow DirectComposite: Saved debug frame to {}", outFile.getAbsolutePath());
+                            }
+                        } catch (Exception debugEx) {
+                            LOGGER.warn("RecipeFlow DirectComposite: Failed to save debug frame: {}", debugEx.getMessage());
+                        }
+                    }
+                }
+            }
+
+            // Force GPU to process the texture upload before rendering
+            GL11.glFlush();
+            GL11.glFinish();
+
+            // Unbind texture to force re-binding during render
+            RenderSystem.bindTexture(0);
+
+            // Now render the item - the atlas now has frame N's pixels at each sprite's location
+            BufferedImage renderedFrame = renderItem(stack);
+            sequenceFrames.add(renderedFrame);
+            frameDurations.add(seqIdx < durations.size() ? durations.get(seqIdx) : 100);
+
+            // Debug: save each rendered frame (the 3D block render) for comparison
+            if (seqIdx < 4) {
+                try {
+                    java.io.File outFile = new java.io.File(debugDir, "rendered_frame" + seqIdx + ".png");
+                    javax.imageio.ImageIO.write(renderedFrame, "PNG", outFile);
+                    LOGGER.info("RecipeFlow DirectComposite: Saved rendered frame {} to {}", seqIdx, outFile.getAbsolutePath());
+                } catch (Exception debugEx) {
+                    LOGGER.warn("RecipeFlow DirectComposite: Failed to save rendered frame: {}", debugEx.getMessage());
+                }
+            }
+
+            LOGGER.debug("RecipeFlow DirectComposite: Rendered frame {} (index {}) for {}",
+                    seqIdx, frameIndex, stack.getItem());
+        }
+
+        // Restore original frame 0 to the atlas (upload from y=0 of source image)
+        for (int i = 0; i < sourceImages.size(); i++) {
+            if (i >= animatedSprites.size()) continue;
+
+            TextureAtlasSprite sprite = animatedSprites.get(i);
+            com.mojang.blaze3d.platform.NativeImage sourceImage = sourceImages.get(i);
+            int w = spriteWidths.get(i);
+            int h = spriteHeights.get(i);
+
+            // Re-upload frame 0 (from y=0) to the atlas
+            if (atlasTextureId != -1) {
+                RenderSystem.bindTexture(atlasTextureId);
+                sourceImage.upload(0, sprite.getX(), sprite.getY(), 0, 0, w, h, false, false);
+            }
+        }
+
+        LOGGER.info("RecipeFlow DirectComposite: Created {} rendered frames for {}, restored original pixels and atlas",
+                sequenceFrames.size(), stack.getItem());
+
+        return new AnimationSequence(sequenceFrames, frameDurations);
+    }
+
+    /**
+     * Animation rendering by uploading frames to texture atlas and re-rendering.
+     *
+     * With SimpleRenderMode enabled in GTCEu, the emissive quads use normal UV coordinates
+     * instead of runtime-recalculated ones. This means uploadFrame() now works correctly -
+     * we upload each frame to the atlas, render the item, and Minecraft applies all the
+     * correct tinting and 3D positioning.
+     *
+     * @param stack The item stack to render
+     * @return AnimationSequence with rendered frames
+     */
+    public AnimationSequence renderAnimationSequencePixelReplace(ItemStack stack) {
+        List<BufferedImage> sequenceFrames = new ArrayList<>();
+        List<Integer> frameDurations = new ArrayList<>();
+
+        if (stack.isEmpty()) {
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Check if this is an OPV/MAX tier machine with animated tint
+        boolean hasAnimatedTint = isGTCEuLoaded() && GTCEuIconHelper.hasAnimatedTint(stack);
+
+        // Get animated sprites
+        List<TextureAtlasSprite> animatedSprites = getAllAnimatedSprites(stack);
+
+        // For non-animated sprites with animated tint, we still need to capture the color cycle
+        if (animatedSprites.isEmpty() && !hasAnimatedTint) {
+            LOGGER.info("RecipeFlow UploadFrame: No animated sprites found for {}", stack.getItem());
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Find the longest sprite animation (most frames) for accurate timing
+        // This ensures we capture the full animation cycle of complex textures like MAX tier casings
+        // which have 50+ frame animations with varying timings
+        TextureAtlasSprite primarySprite = null;
+        int spriteFrameCount = 1;
+        SpriteAnimationMetadata.FrameTimingInfo primaryTiming = null;
+        int longestCycleDurationMs = 0;
+        int mostFrames = 0;
+
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            if (timing.isAnimated()) {
+                int cycleDurationMs = timing.frameDurationsMs().stream().mapToInt(Integer::intValue).sum();
+                int frameCount = timing.frameCount();
+                // Prefer the animation with the most frames (longest/most complex animation)
+                // This ensures we capture the full cycle of textures like MAX tier casings
+                if (frameCount > mostFrames || (frameCount == mostFrames && cycleDurationMs > longestCycleDurationMs)) {
+                    longestCycleDurationMs = cycleDurationMs;
+                    mostFrames = frameCount;
+                    spriteFrameCount = frameCount;
+                    primarySprite = sprite;
+                    primaryTiming = timing;
+                }
+            }
+        }
+
+        // Determine total frame count considering both sprite animation AND tint cycling
+        // IMPORTANT: We need to render at a rate that captures ALL sprite animations,
+        // not just the primary sprite. The overlay may cycle much faster than the casing.
+        int totalFrameCount;
+        List<Integer> perFrameDurations = new ArrayList<>(); // Actual timing for each frame
+
+        // Find the minimum frame duration across ALL animated sprites
+        // This ensures faster-cycling sprites (like overlays) are captured properly
+        int minFrameDurationMs = 100; // Default minimum
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            for (int duration : timing.frameDurationsMs()) {
+                if (duration > 0 && duration < minFrameDurationMs) {
+                    minFrameDurationMs = duration;
+                }
+            }
+        }
+        // Clamp to reasonable range (50ms minimum to avoid too many frames)
+        minFrameDurationMs = Math.max(50, minFrameDurationMs);
+
+        // Calculate total animation duration (use longest cycle or LCM for proper looping)
+        int totalDurationMs = 0;
+        if (primaryTiming != null) {
+            totalDurationMs = primaryTiming.totalDurationMs();
+        }
+        // Also consider other sprites - we want the full animation to loop properly
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            if (timing.totalDurationMs() > totalDurationMs) {
+                totalDurationMs = timing.totalDurationMs();
+            }
+        }
+        if (totalDurationMs <= 0) {
+            totalDurationMs = 2400; // Default 2.4 seconds
+        }
+
+        if (hasAnimatedTint) {
+            if (spriteFrameCount > 1 && primaryTiming != null) {
+                // We have animated sprites with animated tint
+                // Render at minimum frame duration to capture all sprite cycles
+                totalFrameCount = totalDurationMs / minFrameDurationMs;
+                for (int i = 0; i < totalFrameCount; i++) {
+                    perFrameDurations.add(minFrameDurationMs);
+                }
+
+                LOGGER.info("RecipeFlow UploadFrame: {} has animated tint + sprites - rendering {} frames at {}ms each (total {}ms)",
+                        stack.getItem(), totalFrameCount, minFrameDurationMs, totalDurationMs);
+            } else {
+                // No animated sprites, but we have animated tint (pure color cycling)
+                // Use 100ms per frame for 24 frames = 2.4 seconds
+                int targetFrameCount = 24;
+                totalFrameCount = targetFrameCount;
+                int frameDurationMs = 100;
+
+                for (int i = 0; i < totalFrameCount; i++) {
+                    perFrameDurations.add(frameDurationMs);
+                }
+
+                LOGGER.info("RecipeFlow UploadFrame: {} has animated tint only - {} frames at {}ms each for color cycle",
+                        stack.getItem(), totalFrameCount, frameDurationMs);
+            }
+        } else {
+            // No animated tint - render at minimum frame duration to capture all sprite cycles
+            totalFrameCount = totalDurationMs / minFrameDurationMs;
+            for (int i = 0; i < totalFrameCount; i++) {
+                perFrameDurations.add(minFrameDurationMs);
+            }
+
+            LOGGER.info("RecipeFlow UploadFrame: {} sprites only - rendering {} frames at {}ms each (total {}ms)",
+                    stack.getItem(), totalFrameCount, minFrameDurationMs, totalDurationMs);
+        }
+
+        if (totalFrameCount <= 1 && !hasAnimatedTint) {
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        LOGGER.info("RecipeFlow UploadFrame: Rendering {} frames for {} with {} animated sprites, tintCycle={}",
+                totalFrameCount, stack.getItem(), animatedSprites.size(), hasAnimatedTint);
+
+        // Prepare animation info for all sprites (get uploadFrame method handles)
+        List<SpriteAnimationInfo> spriteInfos = new ArrayList<>();
+        for (TextureAtlasSprite sprite : animatedSprites) {
+            SpriteAnimationInfo info = prepareSpritAnimationInfo(sprite);
+            if (info != null) {
+                spriteInfos.add(info);
+                LOGGER.debug("RecipeFlow UploadFrame: Prepared sprite {} at ({},{}) with {} frames",
+                        sprite.contents().name(), info.atlasX, info.atlasY, info.frameCount);
+            }
+        }
+
+        // Get the texture atlas
+        var textureManager = minecraft.getTextureManager();
+        var blockAtlas = textureManager.getTexture(InventoryMenu.BLOCK_ATLAS);
+
+        if (blockAtlas == null && !spriteInfos.isEmpty()) {
+            LOGGER.warn("RecipeFlow UploadFrame: Could not get block atlas texture");
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+            return new AnimationSequence(sequenceFrames, frameDurations);
+        }
+
+        // Ensure SimpleRenderMode is enabled for proper UV handling
+        boolean wasSimpleRenderModeEnabled = SimpleRenderModeHelper.isEnabled();
+        if (!wasSimpleRenderModeEnabled) {
+            SimpleRenderModeHelper.setModeIncludeEmissive();
+        }
+
+        // Save original CLIENT_TIME if we're doing tint cycling
+        long originalClientTime = hasAnimatedTint ? GTCEuIconHelper.getClientTime() : -1;
+
+        // Track cumulative time for CLIENT_TIME advancement
+        long cumulativeTimeMs = 0;
+
+        try {
+            // For each frame, upload to atlas and render
+            for (int frameIdx = 0; frameIdx < totalFrameCount; frameIdx++) {
+                try {
+                    // If we have animated tint, spread a PARTIAL color cycle across the GIF
+                    // A full rainbow is 288 ticks (14.4s), but that's too much color change.
+                    // Instead, we use 1/4 of the rainbow (72 ticks = 90 degrees of hue)
+                    // This gives a subtle, gradual color shift that loops smoothly.
+                    if (hasAnimatedTint && originalClientTime >= 0) {
+                        // Use 1/4 of the full rainbow for subtle color shift
+                        // 72 ticks = 90 degrees of hue change (red->yellow or blue->purple, etc.)
+                        int colorCycleTicks = 72; // 1/4 of 288
+                        double progress = (double) frameIdx / totalFrameCount;
+                        long ticksOffset = (long) (progress * colorCycleTicks);
+                        long newTime = originalClientTime + ticksOffset;
+                        GTCEuIconHelper.setClientTime(newTime);
+                    }
+
+                    // Bind the block atlas texture before uploading frames
+                    if (blockAtlas != null && !spriteInfos.isEmpty()) {
+                        RenderSystem.bindTexture(blockAtlas.getId());
+
+                        // Upload this frame to ALL animated sprites
+                        // Each sprite advances based on elapsed time and its own timing
+                        for (SpriteAnimationInfo info : spriteInfos) {
+                            // Calculate which frame this sprite should be on based on elapsed time
+                            int spriteFrameIndex = calculateSpriteFrameAtTime(info, cumulativeTimeMs);
+                            info.uploadFrameMethod.invoke(info.animatedTexture, info.atlasX, info.atlasY, spriteFrameIndex);
+                        }
+                    }
+
+                    // Now render the full item - the atlas now has this frame's textures
+                    // Minecraft will apply proper tinting (including the current CLIENT_TIME color)
+                    BufferedImage renderedFrame = renderItem(stack);
+                    sequenceFrames.add(renderedFrame);
+
+                    // Get frame duration from the pre-calculated list
+                    int duration = (frameIdx < perFrameDurations.size())
+                            ? perFrameDurations.get(frameIdx) : 100;
+                    frameDurations.add(duration);
+
+                    // Advance cumulative time for next frame's CLIENT_TIME calculation
+                    cumulativeTimeMs += duration;
+
+                    if (frameIdx % 10 == 0 || frameIdx == totalFrameCount - 1) {
+                        LOGGER.info("RecipeFlow UploadFrame: Rendered frame {}/{} for {} (time={}ms)",
+                                frameIdx + 1, totalFrameCount, stack.getItem(), cumulativeTimeMs);
+                    }
+
+                } catch (Exception e) {
+                    LOGGER.warn("RecipeFlow UploadFrame: Failed to render frame {} for {}: {}",
+                            frameIdx, stack.getItem(), e.getMessage());
+                }
+            }
+
+            // Restore frame 0 for all sprites to leave atlas in a clean state
+            if (blockAtlas != null && !spriteInfos.isEmpty()) {
+                try {
+                    RenderSystem.bindTexture(blockAtlas.getId());
+                    for (SpriteAnimationInfo info : spriteInfos) {
+                        info.uploadFrameMethod.invoke(info.animatedTexture, info.atlasX, info.atlasY, 0);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+        } finally {
+            // Restore SimpleRenderMode state
+            if (!wasSimpleRenderModeEnabled) {
+                SimpleRenderModeHelper.disable();
+            }
+
+            // Restore original CLIENT_TIME
+            if (originalClientTime >= 0) {
+                GTCEuIconHelper.setClientTime(originalClientTime);
+            }
+        }
+
+        if (sequenceFrames.isEmpty()) {
+            // Safety fallback
+            sequenceFrames.add(renderItem(stack));
+            frameDurations.add(0);
+        }
+
+        LOGGER.info("RecipeFlow UploadFrame: Created {} frames for {}", sequenceFrames.size(), stack.getItem());
+        return new AnimationSequence(sequenceFrames, frameDurations);
+    }
+
+    /**
+     * Find emissive pixels by comparing two renders: one without emissive quads, one with.
+     * This provides pixel-perfect detection of which pixels are part of the emissive overlay.
+     *
+     * @param withoutEmissive Render with EXCLUDE_EMISSIVE mode (no emissive quads)
+     * @param withEmissive Render with INCLUDE_EMISSIVE mode (emissive quads included)
+     * @return Set of pixel positions that differ between the two renders
+     */
+    private Set<Long> findEmissivePixelsByComparison(BufferedImage withoutEmissive, BufferedImage withEmissive) {
+        Set<Long> emissivePositions = new HashSet<>();
+        int width = Math.min(withoutEmissive.getWidth(), withEmissive.getWidth());
+        int height = Math.min(withoutEmissive.getHeight(), withEmissive.getHeight());
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pixelWithout = withoutEmissive.getRGB(x, y);
+                int pixelWith = withEmissive.getRGB(x, y);
+
+                // If the pixels differ, this is an emissive pixel
+                if (pixelWithout != pixelWith) {
+                    emissivePositions.add(((long)x << 32) | (y & 0xFFFFFFFFL));
+                }
+            }
+        }
+        return emissivePositions;
+    }
+
+    /**
+     * Find pixels that are likely part of the emissive overlay using brightness/saturation heuristics.
+     * This is the legacy fallback when the Mode API is not available.
+     */
+    private Set<Long> findEmissivePixelsByBrightness(BufferedImage image) {
+        Set<Long> emissivePositions = new HashSet<>();
+        int width = image.getWidth();
+        int height = image.getHeight();
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pixel = image.getRGB(x, y);
+                int a = (pixel >> 24) & 0xFF;
+                if (a < 128) continue; // Skip mostly transparent
+
+                int r = (pixel >> 16) & 0xFF;
+                int g = (pixel >> 8) & 0xFF;
+                int b = pixel & 0xFF;
+
+                // Calculate brightness (simple average)
+                float brightness = (r + g + b) / (3.0f * 255.0f);
+
+                // Calculate saturation (difference between max and min channel)
+                int max = Math.max(r, Math.max(g, b));
+                int min = Math.min(r, Math.min(g, b));
+                float saturation = max > 0 ? (float)(max - min) / max : 0;
+
+                // Emissive pixels are typically bright and/or saturated
+                // GTCEu overlays are often cyan/green with high brightness
+                if (brightness > 0.4f && saturation > 0.2f) {
+                    // Store position as a single long (x in high bits, y in low bits)
+                    emissivePositions.add(((long)x << 32) | (y & 0xFFFFFFFFL));
+                }
+            }
+        }
+        return emissivePositions;
+    }
+
+    /**
+     * Compute the average brightness of visible pixels in an image.
+     */
+    private float computeAverageBrightness(BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        float totalBrightness = 0;
+        int count = 0;
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pixel = image.getRGB(x, y);
+                int a = (pixel >> 24) & 0xFF;
+                if (a < 10) continue; // Skip transparent
+
+                int r = (pixel >> 16) & 0xFF;
+                int g = (pixel >> 8) & 0xFF;
+                int b = pixel & 0xFF;
+
+                totalBrightness += (r + g + b) / (3.0f * 255.0f);
+                count++;
+            }
+        }
+
+        return count > 0 ? totalBrightness / count : 0;
+    }
+
+    /**
+     * Create a deep copy of a BufferedImage.
+     */
+    private BufferedImage copyImage(BufferedImage source) {
+        BufferedImage copy = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = copy.createGraphics();
+        g.drawImage(source, 0, 0, null);
+        g.dispose();
+        return copy;
+    }
+
+    /**
      * Universal animation rendering with auto-detected frame count.
      * Tries multiple approaches in order of preference:
-     * 1. GTCEu overlay sprite ticking (renders 3D block with animated textures)
-     * 2. Global texture atlas tick method
+     * 1. Direct frame extraction (most reliable for custom renderers like GTCEu)
+     * 2. GTCEu overlay sprite ticking (renders 3D block with animated textures)
+     * 3. Global texture atlas tick method
      *
-     * Note: Texture-based extraction (flat 2D compositing) was attempted but doesn't
-     * produce correct results for 3D blocks - it composites flat textures instead of
-     * rendering the actual 3D model. The sprite-ticking approach properly renders
-     * the 3D block while advancing the animation frames.
+     * Note: The texture atlas uploadFrame() approach doesn't work for GTCEu because
+     * the UV coordinates are baked into quads at model bake time. GTCEu's
+     * GTQuadTransformers.setSprite() calculates UVs using sprite.getU0/U1/V0/V1()
+     * which always point to frame 0's bounds. Runtime uploadFrame() uploads new
+     * pixel data but the UVs don't change.
+     *
+     * Direct frame extraction bypasses this by reading directly from the source
+     * NativeImage which contains all animation frames as a vertical strip.
      *
      * @param stack The item stack to render
      * @return AnimationSequence with rendered frames
@@ -705,10 +1399,34 @@ public class AnimatedIconRenderer {
             return new AnimationSequence(frames, durations);
         }
 
-        // If we have GTCEu sprites, use the targeted direct frame upload method
-        if (gtSprites != null && !gtSprites.isEmpty()) {
-            LOGGER.info("RecipeFlow: Using targeted GTCEu sprite rendering with {} sprites, {} frames",
+        // For GTCEu items, use PIXEL REPLACEMENT approach
+        // This bypasses the texture atlas animation system entirely because GTCEu's
+        // runtime UV calculation means uploadFrame() doesn't affect the rendered output.
+        // Instead, we render frame 0, then replace pixels that match frame 0's sprite
+        // with pixels from subsequent frames.
+        if (isGTCEuLoaded() && gtSprites != null && !gtSprites.isEmpty()) {
+            LOGGER.info("RecipeFlow: Using PIXEL REPLACEMENT for GTCEu item with {} sprites, {} frames",
                     gtSprites.size(), frameCount);
+
+            // Try pixel replacement first (most reliable for color-transformed textures)
+            AnimationSequence pixelResult = renderAnimationSequencePixelReplace(stack);
+            if (!pixelResult.isEmpty() && pixelResult.totalFrames() > 1) {
+                LOGGER.info("RecipeFlow: Pixel replacement successful - {} frames rendered",
+                        pixelResult.totalFrames());
+                return pixelResult;
+            }
+
+            // Fall back to direct composite (uploads to atlas)
+            LOGGER.warn("RecipeFlow: Pixel replacement failed, trying direct composite");
+            AnimationSequence compositeResult = renderAnimationSequenceDirectComposite(stack);
+            if (!compositeResult.isEmpty() && compositeResult.totalFrames() > 1) {
+                LOGGER.info("RecipeFlow: Direct composite successful - {} frames rendered",
+                        compositeResult.totalFrames());
+                return compositeResult;
+            }
+
+            // Fall back to the old sprite ticking method if compositing fails
+            LOGGER.warn("RecipeFlow: Direct composite failed or returned single frame, trying sprite ticking");
             return renderAnimationSequenceWithSprites(stack, gtSprites, frameCount, frameTimeMs);
         }
 
@@ -1101,19 +1819,63 @@ public class AnimatedIconRenderer {
         final int atlasX;
         final int atlasY;
         final int frameCount;
+        final List<Integer> frameDurationsMs;  // Per-frame durations in milliseconds
+        final List<Integer> frameIndices;      // Actual sprite frame index for each sequence frame
+        final int totalCycleDurationMs;        // Total cycle duration
 
         SpriteAnimationInfo(Object animatedTexture, Method uploadFrameMethod,
-                           int atlasX, int atlasY, int frameCount) {
+                           int atlasX, int atlasY, int frameCount,
+                           List<Integer> frameDurationsMs, List<Integer> frameIndices) {
             this.animatedTexture = animatedTexture;
             this.uploadFrameMethod = uploadFrameMethod;
             this.atlasX = atlasX;
             this.atlasY = atlasY;
             this.frameCount = frameCount;
+            this.frameDurationsMs = frameDurationsMs;
+            this.frameIndices = frameIndices;
+            this.totalCycleDurationMs = frameDurationsMs.stream().mapToInt(Integer::intValue).sum();
         }
     }
 
     /**
+     * Calculate which sprite frame index to upload at a given elapsed time.
+     * This properly handles sprites with different timing - each sprite advances
+     * according to its own per-frame durations.
+     *
+     * IMPORTANT: Returns the actual sprite frame index (for uploadFrame), not the
+     * sequence frame index. The sequence may have 50 frames that cycle through
+     * 10 unique sprite frames with different timings.
+     *
+     * @param info The sprite animation info with timing data
+     * @param elapsedTimeMs The elapsed time in milliseconds since animation start
+     * @return The sprite frame index to upload (the actual texture frame, not sequence position)
+     */
+    private int calculateSpriteFrameAtTime(SpriteAnimationInfo info, long elapsedTimeMs) {
+        if (info.frameCount <= 1 || info.totalCycleDurationMs <= 0) {
+            return 0;
+        }
+
+        // Wrap time to cycle duration
+        long timeInCycle = elapsedTimeMs % info.totalCycleDurationMs;
+
+        // Find which sequence frame we're in by accumulating durations
+        long accumulated = 0;
+        for (int i = 0; i < info.frameDurationsMs.size(); i++) {
+            accumulated += info.frameDurationsMs.get(i);
+            if (timeInCycle < accumulated) {
+                // Return the actual sprite frame index, not the sequence index
+                // The sequence may repeat frames (e.g., 0,1,2,3,2,1,0,...) with different timings
+                return info.frameIndices.get(i);
+            }
+        }
+
+        // Fallback to last frame's sprite index (shouldn't happen with correct timing)
+        return info.frameIndices.get(info.frameCount - 1);
+    }
+
+    /**
      * Prepare animation info for a sprite (find the animatedTexture and uploadFrame method).
+     * Also fetches per-frame timing data from the sprite's animation metadata.
      */
     private SpriteAnimationInfo prepareSpritAnimationInfo(TextureAtlasSprite sprite) {
         try {
@@ -1156,14 +1918,23 @@ public class AnimatedIconRenderer {
                 return null;
             }
 
-            int frameCount = (int) sprite.contents().getUniqueFrames().count();
+            // Get frame timing from sprite metadata
+            SpriteAnimationMetadata.FrameTimingInfo timing = SpriteAnimationMetadata.getFrameTimings(sprite);
+            int frameCount = timing.frameCount();
+            List<Integer> frameDurationsMs = timing.frameDurationsMs();
+            List<Integer> frameIndices = timing.frameIndices();
+
+            LOGGER.debug("RecipeFlow: Sprite {} has {} frames, cycle={}ms, durations={}",
+                    sprite.contents().name(), frameCount, timing.totalDurationMs(), frameDurationsMs);
 
             return new SpriteAnimationInfo(
                     animatedTexture,
                     uploadFrameMethod,
                     sprite.getX(),
                     sprite.getY(),
-                    frameCount
+                    frameCount,
+                    frameDurationsMs,
+                    frameIndices
             );
 
         } catch (Exception e) {
